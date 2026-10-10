@@ -1,0 +1,322 @@
+from __future__ import annotations
+
+import datetime
+import base64
+import json
+from pathlib import Path
+import subprocess
+import time
+import tempfile
+import os
+import secrets
+import threading
+
+from .models import Connection, ManagerError, Store, atomic_private
+from .transport import SSH, Askpass, ConnectionInterrupted
+from .releases import download_exchange
+from .official_packages import download_project
+from .project_info import credential_alias, information_rows, server_key
+from .vault import vault_alias
+
+
+class Controller:
+    def __init__(self, store: Store):
+        self.store = store
+        self.connections = None
+        self.connection_listener = lambda state: None
+        self._connection_lock = threading.Lock()
+        self._connections_closed = False
+
+    def transport(self, connection: Connection, fresh=False) -> SSH:
+        control = self.connections.control_path(connection) if self.connections and not fresh else None
+        return SSH(connection, self.store.directory / "ssh" / connection.identifier, control_path=control)
+
+    def keep_connection(self, connection):
+        with self._connection_lock:
+            if self._connections_closed:
+                raise ManagerError("程序正在关闭，不再建立连接。")
+            if self.connections is None:
+                from .connections import PersistentConnections
+                self.connections = PersistentConnections(self.connection_listener)
+            manager = self.connections
+        manager.connect(self.transport(connection, fresh=True))
+
+    def connection_status(self, connection):
+        return self.connections.status(connection) if self.connections else {"state": "disconnected", "token": ""}
+
+    def disconnect_connection(self, identifier):
+        if self.connections:
+            self.connections.disconnect(identifier)
+
+    def close_connections(self):
+        with self._connection_lock:
+            self._connections_closed = True
+            manager = self.connections
+        if manager:
+            manager.close()
+
+    def inspect(self, connection: Connection) -> dict:
+        report = self.transport(connection).call({"action": "snapshot", "include_projects": True, "host": connection.host})
+        report["project_information"] = {kind:self._project_information(connection, kind, data) for kind,data in report.get("project_details",{}).items()}
+        self.observe_tasks(connection, report.get("tasks", []))
+        return report
+
+    def observe_tasks(self, connection, tasks):
+        latest = {row["task_id"]:row for row in self.store.history() if row.get("server_id") == connection.identifier}
+        redactor = self.transport(connection).redactor
+        for task in tasks:
+            previous = latest.get(task.get("id"))
+            if previous and task.get("state") in {"succeeded", "failed", "rolled_back", "recovery_failed"} and previous.get("state") != task["state"]:
+                self.store.record(previous | {"state":task["state"], "message":redactor.text(task.get("message", ""))})
+
+    def tasks(self, connection):
+        data = self.transport(connection).call({"action":"tasks"})
+        self.observe_tasks(connection, data["tasks"])
+        return data
+
+    def _project_information(self, connection, service, data):
+        values = self.store.vault.get(credential_alias(connection,service)) if service in {"exchange","hysteria2","xui"} else {}
+        if service in {"hysteria2", "xui"}:
+            alias = vault_alias("service-pending", credential_alias(connection, service))
+            pending = self.store.vault.get(alias)
+            verified = bool(pending.get("proxy_password") and pending["proxy_password"] == data.get("proxy_password")) if service == "hysteria2" else False
+            if service == "xui" and pending.get("panel_password") and data.get("panel_username"):
+                try:
+                    verified = self.transport(connection).call({"action":"verify_project_password", "service":"xui", "username":pending.get("panel_username") or data["panel_username"], "password":pending["panel_password"]}).get("verified", False)
+                except ManagerError:
+                    # An incomplete installation must not hide the other
+                    # projects or replace the last known working password.
+                    verified = False
+            if verified:
+                self.store.vault.put(credential_alias(connection, service), pending)
+                self.store.vault.delete(alias)
+                values = pending
+        return {"server_key":server_key(connection),"service":service,"data":data,"rows":information_rows(data,connection,values)}
+
+    def project_information(self, connection, service):
+        data = self.transport(connection).call({"action":"details","service":service,"host":connection.host})
+        return self._project_information(connection,service,data)
+
+    def deployment_preview(self, connection, params):
+        return self.transport(connection).call({"action":"deployment_preflight", "params":params})
+
+    def generate_key(self, connection: Connection, passphrase: str) -> tuple[str, str]:
+        if len(passphrase) < 16 or any(c in passphrase for c in "\n\r\x00"):
+            raise ManagerError("私钥口令至少 16 位，不能包含换行。")
+        folder = self.store.directory / "keys" / connection.identifier
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        key = folder / ("manager-" + str(time.time_ns()))
+        with tempfile.TemporaryDirectory(prefix="key-", dir=folder) as temporary:
+            with Askpass(Path(temporary), passphrase) as environment:
+                result = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-a", "64", "-C", "linux-server-manager", "-f", str(key)], stdin=subprocess.DEVNULL, capture_output=True, env=os.environ | environment, start_new_session=True, timeout=30)
+        if result.returncode:
+            raise ManagerError("无法生成本机密钥，请确认 OpenSSH 工具可用。")
+        key.chmod(0o600)
+        # Escrow the encryption password before sending any public key to Linux.
+        try:
+            alias = vault_alias("generated-key", connection.identifier + "/" + key.name)
+            self.store.vault.put(alias, {"key_passphrase": passphrase})
+            if self.store.vault.get(alias).get("key_passphrase") != passphrase:
+                raise ManagerError("本机钥匙串验证失败。")
+            atomic_private(folder / (key.name + ".json"), json.dumps({"key_path": str(key), "vault_alias": alias}))
+        except ManagerError:
+            key.unlink(missing_ok=True)
+            key.with_suffix(".pub").unlink(missing_ok=True)
+            raise ManagerError("私钥口令无法安全保存到本机钥匙串，已停止；服务器尚未修改。") from None
+        return str(key), key.with_suffix(".pub").read_text().strip()
+
+    def public_key(self, connection):
+        with tempfile.TemporaryDirectory(prefix="public-", dir=self.store.directory) as temporary:
+            with Askpass(Path(temporary), connection.key_passphrase) as environment:
+                result = subprocess.run(["ssh-keygen", "-y", "-f", connection.key_path], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=os.environ | environment, start_new_session=True, timeout=30)
+        if result.returncode:
+            raise ManagerError("无法读取原私钥的公钥，不能自动撤销旧钥匙。")
+        return result.stdout.strip()
+
+    def trust_same_server(self, original: SSH, candidate: SSH) -> None:
+        if candidate.trusted():
+            return
+        _, keys = candidate.fingerprint()
+        old_keys = {tuple(line.split()[1:3]) for line in original.known_hosts.read_text().splitlines() if len(line.split()) >= 3}
+        new_keys = {tuple(line.split()[1:3]) for line in keys.splitlines() if len(line.split()) >= 3}
+        if not new_keys or not new_keys <= old_keys:
+            raise ManagerError("新端口的服务器身份不一致，已停止验证，配置将在超时后恢复。")
+        candidate.trust(keys)
+
+    def candidate(self, connection: Connection, params: dict, result: dict) -> Connection:
+        operation = params["operation"]
+        changes = {}
+        verify = result.get("verification", {})
+        if operation in {"create_admin", "rename_user", "ssh"}:
+            changes["username"] = verify.get("username", connection.username)
+        if operation in {"ssh", "firewall"} and "port" in verify:
+            changes["port"] = verify["port"]
+        if operation == "create_admin":
+            changes.update(password=params["new_password"], sudo_password=params["new_password"])
+            if params.get("local_key_path"):
+                changes.update(auth="key", key_path=params["local_key_path"], key_passphrase=params.get("local_key_passphrase", ""))
+            else:
+                changes["auth"] = "password"
+        if operation in {"ssh", "prepare_key"} and params.get("local_key_path"):
+            changes.update(auth="key", key_path=params["local_key_path"], key_passphrase=params.get("local_key_passphrase", ""))
+        if operation == "password" and params.get("username") == connection.username:
+            changes.update(password=params["new_password"], sudo_password=params["new_password"])
+        return connection.changed(**changes)
+
+    def verify_task(self, connection: Connection, identifier: str, params: dict, status: dict) -> Connection:
+        candidate = self.candidate(connection, params, status.get("result", {}))
+        ssh = self.transport(candidate, fresh=True)
+        self.trust_same_server(self.transport(connection), ssh)
+        last = None
+        for _ in range(8):
+            try:
+                ssh.call({"action": "ping"}, timeout=25)
+                if params["operation"] == "password":
+                    checked = ssh.call({"action": "verify_password", "username": params["username"], "password": params["new_password"]})
+                    if not checked["verified"]:
+                        raise ManagerError("新密码的服务器端验证失败，未确认变更。")
+                ssh.call({"action": "confirm", "task_id": identifier})
+                return candidate
+            except ManagerError as error:
+                last = error
+                time.sleep(2)
+        raise ManagerError("新连接尚未验证成功。请勿重复提交；服务器将在保护时限内恢复原配置。" + (" " + str(last) if last else ""))
+
+    def execute(self, connection: Connection, params: dict, progress=lambda status: None) -> tuple[dict, Connection]:
+        original = connection
+        ssh = self.transport(connection, fresh=True)
+        ssh.redactor.add(*(v for k, v in params.items() if isinstance(v, str) and any(x in k for x in ["password", "username", "key", "host"])))
+        wire = {k: v for k, v in params.items() if not k.startswith("local_")}
+        if params.get("operation") in {"account_access", "delete_user"}:
+            if params.get("username") == connection.username or connection.username == "root":
+                raise ManagerError("请先使用另一个普通管理员连接，再禁用或删除账号。")
+            # A new SSH session verifies the spare admin immediately before mutation.
+            ssh.call({"action": "ping"})
+            wire["verified_username"] = connection.username
+        deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "xui", "nginx"}
+        pending_values = None
+        if deployment:
+            preflight = ssh.call({"action": "deployment_preflight", "params": wire})
+            if params.get("deployment_fingerprint") and params["deployment_fingerprint"] != preflight["fingerprint"]:
+                raise ManagerError("项目配置在预览后发生变化，未执行改动。请重新预览。")
+            kind = params["service"]
+            wire["version"] = preflight["version"]
+            wire["deployment_fingerprint"] = preflight["fingerprint"]
+            if kind in {"hysteria2", "xui"}:
+                pending_values = self.store.vault.get(credential_alias(connection, kind)) | {key:params[key] for key in ["proxy_password", "panel_username", "panel_password"] if params.get(key)}
+                # Escrow proposed values locally without replacing a working
+                # panel password before the server change has been verified.
+                self.store.vault.put(vault_alias("service-pending", credential_alias(connection, kind)), pending_values)
+            if preflight["requires_archive"]:
+                progress({"state": "preparing", "progress": 5, "message": "在本机下载并校验已确认版本的官方发行包…"})
+                with tempfile.TemporaryDirectory(prefix="lm-release-", dir=self.store.directory) as directory:
+                    archive = Path(directory) / "release.tar.gz"
+                    wire["release_sha256"] = download_exchange(preflight["version"], archive) if kind == "exchange" else download_project(kind, preflight["version"], preflight["architecture"], archive)
+                    wire["release_archive"] = base64.b64encode(archive.read_bytes()).decode()
+                    progress({"state": "preparing", "progress": 10, "message": "通过 SSH 传送已校验的发行包…"})
+                    started = ssh.call({"action": "start", "params": wire}, timeout=180)
+                wire.pop("release_archive", None)
+            else:
+                started = ssh.call({"action": "start", "params": wire})
+        else:
+            started = ssh.call({"action": "start", "params": wire})
+        identifier = started["task_id"]
+        created = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": "submitted", "created": created, "message": "任务已提交。"})
+        progress({"task_id": identifier, "state": "queued", "progress": 0, "message": "任务已提交。"})
+        status = {}
+        poll_connection = connection
+        for _ in range(1200):
+            try:
+                status = self.transport(poll_connection).call({"action": "task", "task_id": identifier}, timeout=30)
+            except ManagerError as error:
+                # A rename or SSH change can make the original endpoint disappear.
+                if params["operation"] in {"ssh", "rename_user", "password", "login_policy", "retire_key", "prepare_key"}:
+                    preliminary = {"verification": {"username": params.get("new_username", params.get("username", connection.username)), "port": params.get("port", connection.port)}}
+                    poll_connection = self.candidate(connection, params, preliminary)
+                    try:
+                        new_ssh = self.transport(poll_connection)
+                        self.trust_same_server(ssh, new_ssh)
+                        status = new_ssh.call({"action": "task", "task_id": identifier}, timeout=30)
+                    except ManagerError:
+                        time.sleep(2)
+                        continue
+                elif isinstance(error, ConnectionInterrupted) and self.connections and self.connection_status(poll_connection)["state"] in {"connecting", "connected", "reconnecting"}:
+                    progress({"task_id":identifier, "state":"running", "progress":status.get("progress", 0), "message":"网络暂时中断，等待恢复后读取已有任务结果；不会重复执行。"})
+                    time.sleep(2)
+                    continue
+                else:
+                    raise ManagerError("连接中断。后台任务继续运行；重新连接后在操作记录中查看任务结果。") from None
+            progress(status)
+            if status["state"] in {"succeeded", "failed", "rolled_back", "awaiting_verification", "recovery_failed"}:
+                break
+            time.sleep(2)
+        else:
+            raise ManagerError("任务仍未结束，请在操作记录中查看后台任务，勿重复执行。")
+        if status["state"] == "awaiting_verification":
+            progress(status | {"message": "正在使用新连接验证账号和管理员权限…"})
+            connection = self.verify_task(connection, identifier, params, status)
+            status = self.transport(connection).call({"action": "task", "task_id": identifier})
+        self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": status["state"], "created": created, "message": ssh.redactor.text(status["message"])})
+        if status["state"] != "succeeded":
+            if deployment and pending_values is not None and preflight["installed"] and status["state"] in {"failed", "rolled_back"}:
+                self.store.vault.delete(vault_alias("service-pending", credential_alias(connection, params["service"])))
+            raise ManagerError(ssh.redactor.text(status["message"]))
+        if deployment and pending_values is not None:
+            self.store.vault.put(credential_alias(connection, params["service"]), pending_values)
+            self.store.vault.delete(vault_alias("service-pending", credential_alias(connection, params["service"])))
+        if params["operation"] == "ssh" and original.port != connection.port:
+            for kind in ["exchange", "hysteria2", "xui"]:
+                values = self.store.vault.get(credential_alias(original,kind))
+                if values:
+                    self.store.vault.put(credential_alias(connection,kind),values)
+        profiles, identifiers = self.synchronize_profiles(self.store.profiles(), original, connection, params)
+        self.store.save(profiles, update_identifiers=identifiers)
+        if params["operation"] == "delete_user":
+            for profile in profiles:
+                if profile.host == original.host and profile.username == params["username"]:
+                    self.store.vault.delete(vault_alias("security-recovery", profile.identifier))
+        return status, connection
+
+    def synchronize_profiles(self, profiles, original, updated, params):
+        result, identifiers = [], set()
+        operation = params["operation"]
+        for profile in profiles:
+            changes = {}
+            if profile.identifier == updated.identifier:
+                profile = updated
+                identifiers.add(profile.identifier)
+            elif profile.host == original.host:
+                target = params.get("old_username") if operation == "rename_user" else params.get("username")
+                if profile.username == target:
+                    if operation == "password":
+                        changes.update(password=params["new_password"], sudo_password=params["new_password"])
+                    elif operation == "rename_user":
+                        changes["username"] = params["new_username"]
+                    elif operation == "delete_user":
+                        changes.update(password="", sudo_password="", key_passphrase="", remember=False)
+                if operation == "ssh" and profile.port == original.port:
+                    changes["port"] = updated.port
+                if operation in {"ssh", "prepare_key"} and profile.username == original.username and updated.auth == "key":
+                    changes.update(auth="key", key_path=updated.key_path, key_passphrase=updated.key_passphrase)
+                if changes:
+                    profile = profile.changed(**changes)
+                    identifiers.add(profile.identifier)
+            result.append(profile)
+        return result, identifiers
+
+    def account_details(self, connection, account):
+        from .key_info import encrypted_key
+        result = self.transport(connection).call({"action": "account_details", "username": account})
+        paths = []
+        for profile in self.store.profiles():
+            if profile.host == connection.host and profile.username == account and profile.auth == "key" and profile.key_path:
+                paths.append(profile.key_path)
+        result["local_private_keys"] = list(dict.fromkeys(paths))
+        result["local_key_encryption"] = {path: encrypted_key(path) for path in result["local_private_keys"]}
+        return result
+
+    def security_plan(self, connection, options, progress=lambda status: None):
+        from .security_plan import apply_plan
+        return apply_plan(self, connection, options, progress)
+
