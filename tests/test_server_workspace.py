@@ -64,6 +64,8 @@ class ServerWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(app.pages), 8)
         self.assertEqual(set(app.navigation_tree.get_children()), set(NAVIGATION))
         for name in NAVIGATION:
+            if name == "命令行":
+                continue
             app.navigation_tree.selection_set(name)
             app._navigate()
             app.update()
@@ -94,6 +96,17 @@ class ServerWorkspaceTests(unittest.TestCase):
         self.assertEqual(app.password_var.get(), session.password)
         app._connect.assert_called_once_with()
         self.assertEqual(app.notebook.select(), str(app.pages["连接服务器"]))
+        self.controller.execute.assert_not_called()
+
+    def test_terminal_menu_preserves_the_active_management_page_and_inputs(self):
+        app = self.app
+        app.notebook.select(app.pages["安全防护"]); app.update()
+        app._open_terminal = mock.Mock()
+        app.navigation_tree.selection_set("命令行")
+        app._navigate(); app.update()
+        app._open_terminal.assert_called_once_with()
+        self.assertEqual(app.notebook.select(), str(app.pages["安全防护"]))
+        self.assertEqual(app.navigation_tree.selection(), ("安全防护",))
         self.controller.execute.assert_not_called()
 
     def test_mouse_click_connects_saved_server_but_loading_a_profile_does_not(self):

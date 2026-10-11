@@ -36,6 +36,7 @@ NAVIGATION = {
     "日常维护": "应用管理",
     "账号与登录": "账号与登录",
     "安全防护": "安全防护",
+    "命令行": "命令行",
     "操作记录": "操作记录",
     "连接服务器": "连接设置",
     "服务器列表": "服务器档案",
@@ -313,6 +314,10 @@ class App(tk.Tk):
         if not selection:
             return
         page = selection[0]
+        if page == "命令行":
+            self._page_changed()
+            self._open_terminal()
+            return
         current = self.notebook.select()
         if page == "日常维护" and current in {str(self.pages["一键部署"]), str(self.pages["日常维护"])}:
             return
@@ -1321,6 +1326,17 @@ class App(tk.Tk):
             messagebox.showinfo("等待连接恢复", state.get("message", "请先连接服务器。") + "\n\n请勿重复提交已经执行的任务。", parent=self)
             return False
         return True
+
+    def _open_terminal(self):
+        if self.busy or not self._ready():
+            return
+        connection = self.current
+
+        def done(_):
+            self.status.configure(text="已打开当前服务器的命令行窗口，可连续输入或粘贴多行代码。退出请输入 exit。")
+
+        self._run(lambda: self.controller.open_terminal(connection), done,
+                  "正在打开当前服务器的命令行…")
 
     def _render_report(self):
         if not self.report: return

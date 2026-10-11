@@ -28,7 +28,8 @@ def run(arguments, **kwargs):
 def configure_bundle(bundle):
     path = bundle / "Contents/Info.plist"
     metadata = plistlib.loads(path.read_bytes())
-    metadata.update(CFBundleShortVersionString=VERSION, CFBundleVersion=VERSION, LSMinimumSystemVersion="11.0")
+    metadata.update(CFBundleShortVersionString=VERSION, CFBundleVersion=VERSION, LSMinimumSystemVersion="11.0",
+                    NSAppleEventsUsageDescription="用于打开当前服务器的命令行窗口。")
     path.write_bytes(plistlib.dumps(metadata))
     # Updating Info.plist invalidates the root bundle's ad-hoc signature.
     run(["codesign", "--force", "--sign", "-", str(bundle)], timeout=60)

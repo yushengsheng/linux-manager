@@ -57,6 +57,10 @@ class Controller:
         if manager:
             manager.close()
 
+    def open_terminal(self, connection):
+        from .terminal import open_terminal
+        return open_terminal(self.transport(connection))
+
     def inspect(self, connection: Connection) -> dict:
         report = self.transport(connection).call({"action": "snapshot", "include_projects": True, "host": connection.host})
         report["project_information"] = {kind:self._project_information(connection, kind, data) for kind,data in report.get("project_details",{}).items()}
