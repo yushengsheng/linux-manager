@@ -2,7 +2,7 @@
 
 ## v0.3.9 正式发行
 
-从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/tag/v0.3.9) 下载 `linux服务器管理-macOS-v0.3.9.zip`，适用于 macOS 11 或更新版本、Apple Silicon（arm64）。解压后正常退出旧程序，再双击同文件夹的 `启动linux服务器管理.app`；主程序自带 Python / Tk，无需开发环境。本机交付目录为 `新版v0.3.9/`，左上角版本应显示 0.3.9。
+从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/tag/v0.3.9) 下载 `linux-server-manager-macOS-v0.3.9.zip`，适用于 macOS 11 或更新版本、Apple Silicon（arm64）。解压后正常退出旧程序，再双击同文件夹的 `启动linux服务器管理.app`；主程序自带 Python / Tk，无需开发环境。本机交付目录为 `新版v0.3.9/`，左上角版本应显示 0.3.9。
 
 新版沿用原本机服务器档案、私钥与钥匙串，不会清空保存的信息；系统可能要求再次允许新版访问钥匙串。未保存的表单输入及取消记住后的登录口令不属于持久保存资料。发行包不含个人数据，也不会更新或重启服务器上的项目。使用同页 `SHA256SUMS` 核验下载完整性；本包为临时签名，未经过 Apple 开发者公证，如被系统拦截，核实来源后按 macOS「隐私与安全性」的提示允许打开，不关闭系统安全检查。
 

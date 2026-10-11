@@ -4,7 +4,7 @@
 
 ## 下载与更新
 
-从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux服务器管理-macOS-v0.3.9.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
+从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.9.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
 
 先正常退出旧程序再打开新版。沿用原本机档案、私钥及钥匙串，不需要重新添加服务器；新版可能需要再次允许访问钥匙串。本包使用临时签名，未经过 Apple 开发者公证：确认下载来源和校验值后，如系统拦截，按 macOS「隐私与安全性」的提示允许打开，不要关闭系统安全检查。
 
