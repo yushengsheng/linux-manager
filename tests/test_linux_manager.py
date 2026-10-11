@@ -80,7 +80,8 @@ class ReleaseSelectionTests(unittest.TestCase):
     def test_network_failure_does_not_fall_back_to_another_version(self):
         with mock.patch("linux_manager.releases.urllib.request.urlopen", side_effect=urllib.error.URLError("unavailable")) as request:
             with self.assertRaises(ManagerError): exchange_version()
-            self.assertEqual(request.call_count, 1)
+            self.assertEqual(request.call_count, 2)
+            self.assertTrue(request.call_args.args[0].full_url.endswith("/releases/latest"))
 
     def app(self, mode=LATEST_STABLE):
         app = object.__new__(App)

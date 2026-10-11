@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 import urllib.parse
 import webbrowser
 
@@ -23,7 +23,7 @@ from .releases import LATEST_STABLE, SPECIFIC_VERSION, KEEP_CURRENT, exchange_ve
 from .help_texts import HELP
 from .widgets import HelpAction, ScrollPage, install_check_style, sync_tree
 from .key_info import encrypted_key
-from .project_info import server_key, credential_alias
+from .project_info import server_key, credential_alias, SERVICE_PROTOCOLS, deployment_network_hint
 from .official_packages import official_version
 
 BASE = Path(__file__).resolve().parents[1]
@@ -31,11 +31,19 @@ BG = "#f4f6fa"
 INK = "#17243d"
 MUTED = "#718096"
 BLUE = "#2563eb"
-FONT = "PingFang SC" if sys.platform == "darwin" else "Helvetica"
+NAVIGATION = {
+    "服务器总览": "服务器概览",
+    "日常维护": "应用管理",
+    "账号与登录": "账号与登录",
+    "安全防护": "安全防护",
+    "操作记录": "操作记录",
+    "连接服务器": "连接设置",
+    "服务器列表": "服务器档案",
+}
 
 
 def data_directory():
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) or "--desktop-data" in sys.argv:
         return Path.home() / "Library/Application Support/linux服务器管理"
     return BASE / "data/linux-manager"
 
@@ -122,6 +130,12 @@ class App(tk.Tk):
                 self.after(200, self._check_ui)
                 return
         result = {"version": VERSION, "mapped": bool(self.winfo_ismapped()), "pages": len(self.pages), "horizontal_overflow": [], "help_dialog": False, "tab_switch_ms": {}, "privacy_enabled": self.privacy.get()}
+        style = ttk.Style(self)
+        result["caption_line_height"] = font.nametofont("TkCaptionFont", root=self).metrics("linespace")
+        result["font_line_heights"] = {
+            name: font.Font(root=self, font=style.lookup(name, "font")).metrics("linespace")
+            for name in ["Title.TLabel", "Heading.TLabel", "TLabel", "TButton", "Treeview", "Navigation.Treeview"]
+        }
         selected = self.notebook.select()
         for name, page in self.pages.items():
             started = time.perf_counter()
@@ -176,53 +190,102 @@ class App(tk.Tk):
     def _style(self):
         style = ttk.Style(self)
         style.theme_use("clam")
-        self.option_add("*Font", (FONT, 12))
+        # Tk system fonts match the native caption; point sizes are enlarged by Tk's DPI scaling.
+        self.option_add("*Font", "TkDefaultFont")
         style.configure("TFrame", background="white")
         style.configure("Chrome.TFrame", background=BG)
         style.configure("Card.TFrame", background="white")
-        style.configure("TLabel", background="white", foreground=INK, font=(FONT, 12))
-        style.configure("Chrome.TLabel", background=BG, foreground=MUTED, font=(FONT, 11))
-        style.configure("Muted.TLabel", foreground=MUTED, font=(FONT, 11))
-        style.configure("Title.TLabel", font=(FONT, 22, "bold"), background=BG)
-        style.configure("Heading.TLabel", font=(FONT, 14, "bold"))
+        style.configure("TLabel", background="white", foreground=INK, font="TkDefaultFont")
+        style.configure("Chrome.TLabel", background=BG, foreground=MUTED, font="TkDefaultFont")
+        style.configure("Muted.TLabel", foreground=MUTED, font="TkDefaultFont")
+        style.configure("Title.TLabel", font="TkCaptionFont", background=BG)
+        style.configure("Heading.TLabel", font="TkCaptionFont")
         style.configure("Card.TLabel", background="white")
-        style.configure("Stat.TLabel", background="white", font=(FONT, 21, "bold"), foreground=BLUE)
-        style.configure("TButton", font=(FONT, 11), padding=(14, 8), background="#f4f7fc", foreground=INK, bordercolor="#dde5f0", relief="flat", borderwidth=1)
+        style.configure("Stat.TLabel", background="white", font="TkCaptionFont", foreground=BLUE)
+        style.configure("TButton", font="TkDefaultFont", padding=(10, 5), background="#f4f7fc", foreground=INK, bordercolor="#dde5f0", relief="flat", borderwidth=1)
         style.map("TButton", background=[("active", "#eaf0fa"), ("pressed", "#e0e9f8")], foreground=[("disabled", "#9aa8ba")])
-        style.configure("Help.TButton", foreground=MUTED, background="white", borderwidth=0, padding=(4, 5))
+        style.configure("Help.TButton", foreground=MUTED, background="white", borderwidth=0, padding=(3, 3))
         style.map("Help.TButton", background=[("active", "#eef4ff")], foreground=[("active", BLUE)])
-        style.configure("Primary.TButton", background=BLUE, foreground="white", borderwidth=0, padding=(16, 9))
+        style.configure("Primary.TButton", background=BLUE, foreground="white", borderwidth=0, padding=(12, 6))
         style.map("Primary.TButton", background=[("active", "#2656c3"), ("disabled", "#ccd3e1")])
         style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", font=(FONT, 12), padding=(17, 11), background=BG, foreground=MUTED, borderwidth=0)
+        style.configure("TNotebook.Tab", font="TkDefaultFont", padding=(12, 6), background=BG, foreground=MUTED, borderwidth=0)
         style.map("TNotebook.Tab", background=[("selected", "white"), ("active", "#eaf0fa")], foreground=[("selected", BLUE), ("active", INK)])
-        style.configure("TEntry", padding=(10, 8), fieldbackground="white", bordercolor="#dbe3ee", lightcolor="#dbe3ee", darkcolor="#dbe3ee", relief="flat")
+        style.configure("TEntry", font="TkDefaultFont", padding=(8, 5), fieldbackground="white", bordercolor="#dbe3ee", lightcolor="#dbe3ee", darkcolor="#dbe3ee", relief="flat")
         style.map("TEntry", bordercolor=[("focus", BLUE)])
-        style.configure("TCombobox", padding=(9, 7), fieldbackground="white", background="#f5f8fd", bordercolor="#dbe3ee", arrowsize=14)
-        style.configure("Treeview", rowheight=34, font=(FONT, 11), background="white", fieldbackground="white", borderwidth=0)
-        style.configure("Treeview.Heading", font=(FONT, 11, "bold"), padding=10, background="#f4f7fc", foreground=MUTED, relief="flat")
+        style.configure("TCombobox", font="TkDefaultFont", padding=(7, 5), fieldbackground="white", background="#f5f8fd", bordercolor="#dbe3ee", arrowsize=14)
+        style.configure("Treeview", rowheight=24, font="TkDefaultFont", background="white", fieldbackground="white", borderwidth=0)
+        style.configure("Treeview.Heading", font="TkCaptionFont", padding=6, background="#f4f7fc", foreground=MUTED, relief="flat")
         style.map("Treeview", background=[("selected", "#eaf2ff")], foreground=[("selected", "#1e40af")])
-        style.configure("TCheckbutton", background="white", font=(FONT, 11), padding=(0, 3))
+        style.configure("TCheckbutton", background="white", font="TkDefaultFont", padding=(0, 2))
         style.map("TCheckbutton", background=[("active", "white")], foreground=[("disabled", "#9aa8ba")])
         install_check_style(style, self)
         style.configure("TLabelframe", background="white", bordercolor="#e1e7f0", relief="solid", borderwidth=1)
-        style.configure("TLabelframe.Label", background="white", foreground=INK, font=(FONT, 13, "bold"))
-        style.configure("Recommended.TLabel", background="#eaf9f0", foreground="#168249", font=(FONT, 10, "bold"), padding=(8, 3))
+        style.configure("TLabelframe.Label", background="white", foreground=INK, font="TkCaptionFont")
+        style.configure("Recommended.TLabel", background="#eaf9f0", foreground="#168249", font="TkSmallCaptionFont", padding=(8, 3))
         style.configure("TProgressbar", background=BLUE, troughcolor="#e8edf6", borderwidth=0)
+        style.configure("Sidebar.Treeview", rowheight=26, font="TkDefaultFont", background="white", fieldbackground="white")
+        style.configure("Navigation.Treeview", rowheight=26, font="TkDefaultFont", background="white", fieldbackground="white")
+        style.configure("Workspace.TNotebook", background=BG, borderwidth=0, tabmargins=0)
+        style.layout("Workspace.TNotebook.Tab", [])
 
     def _build(self):
-        header = ttk.Frame(self, padding=(24, 18, 24, 12), style="Chrome.TFrame")
+        header = ttk.Frame(self, padding=(16, 10, 16, 8), style="Chrome.TFrame")
         header.pack(fill="x")
         ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text=f"  {VERSION} · 本地桌面版", style="Chrome.TLabel").pack(side="left", pady=(8, 0))
+        edition = "本地桌面版" if getattr(sys, "frozen", False) else "本地源码版"
+        ttk.Label(header, text=f"  {VERSION} · {edition}", style="Chrome.TLabel").pack(side="left")
         self._check(header, "隐藏连接与账号信息", self.privacy, self._privacy_changed).pack(side="right")
         self._button(header, "使用说明", lambda: self._help()).pack(side="right", padx=10)
         self._button(header, "断开连接", self._disconnect).pack(side="right")
-        self.connection_badge = ttk.Label(header, text="● 尚未连接", style="Chrome.TLabel")
-        self.connection_badge.pack(side="right", padx=20)
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=24, pady=10)
+        body = ttk.Frame(self, style="Chrome.TFrame")
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        sidebar = ttk.Frame(body, padding=12, width=216)
+        sidebar.pack(side="left", fill="y", padx=(0, 12))
+        sidebar.pack_propagate(False)
+        self._help_label(sidebar, "我的服务器").pack(anchor="w", pady=(0, 10))
+        self.server_count = ttk.Label(sidebar, text="尚未保存服务器", style="Muted.TLabel")
+        self.server_count.pack(anchor="w", pady=(0, 8))
+        servers = ttk.Frame(sidebar); servers.pack(fill="x")
+        self.server_tree = ttk.Treeview(servers, columns=("name", "state"), show="headings", height=5, selectmode="browse", style="Sidebar.Treeview")
+        self.server_tree.heading("name", text="服务器")
+        self.server_tree.heading("state", text="连接")
+        self.server_tree.column("name", width=130, minwidth=80)
+        self.server_tree.column("state", width=54, minwidth=54, stretch=False, anchor="center")
+        scrollbar = ttk.Scrollbar(servers, orient="vertical", command=self.server_tree.yview)
+        self.server_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y"); self.server_tree.pack(fill="x")
+        self.server_tree.bind("<ButtonRelease-1>", self._choose_sidebar_server)
+        self.server_tree.bind("<Return>", self._choose_sidebar_server)
+        self.server_tree.bind("<space>", self._choose_sidebar_server)
+        self._button(sidebar, "添加新服务器", self._new_profile).pack(fill="x", pady=(8, 12))
+        ttk.Separator(sidebar).pack(fill="x", pady=(0, 10))
+        ttk.Label(sidebar, text="管理当前服务器", style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+        self.navigation_tree = ttk.Treeview(sidebar, show="tree", height=len(NAVIGATION), selectmode="browse", style="Navigation.Treeview")
+        self.navigation_tree.column("#0", width=180, minwidth=80)
+        for page, title in NAVIGATION.items():
+            self.navigation_tree.insert("", "end", iid=page, text="  " + title)
+        self.navigation_tree.pack(fill="x")
+        self.navigation_tree.bind("<<TreeviewSelect>>", self._navigate)
+
+        workspace = ttk.Frame(body, style="Chrome.TFrame")
+        workspace.pack(side="left", fill="both", expand=True)
+        context = ttk.Frame(workspace, padding=(4, 4, 4, 6), style="Chrome.TFrame")
+        context.pack(fill="x")
+        self.connection_badge = ttk.Label(context, text="● 尚未连接", style="Chrome.TLabel")
+        self.connection_badge.pack(side="right", padx=(16, 0))
+        self.current_server_label = ttk.Label(context, text="先添加或选择一台服务器", style="Heading.TLabel", background=BG, wraplength=600)
+        self.current_server_label.pack(side="left", fill="x", expand=True)
+        self.workspace_title = ttk.Label(workspace, text="连接设置", style="Title.TLabel")
+        self.workspace_title.pack(anchor="w", padx=4, pady=(0, 6))
+        self.application_tabs = ttk.Frame(workspace, style="Chrome.TFrame")
+        self.application_install = self._button(self.application_tabs, "安装与配置", lambda: self.notebook.select(self.pages["一键部署"]), track=False)
+        self.application_install.pack(side="left", padx=(0, 10))
+        self.application_manage = self._button(self.application_tabs, "运行与备份", lambda: self.notebook.select(self.pages["日常维护"]), track=False)
+        self.application_manage.pack(side="left")
+        self.notebook = ttk.Notebook(workspace, style="Workspace.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
         self.pages = {}
         for name in ["连接服务器", "服务器列表", "服务器总览", "账号与登录", "安全防护", "一键部署", "日常维护", "操作记录"]:
             frame = ScrollPage(self.notebook, BG)
@@ -236,12 +299,134 @@ class App(tk.Tk):
         self._deployment_page()
         self._maintenance_page()
         self._history_page()
-        footer = ttk.Frame(self, padding=(24, 2, 24, 18), style="Chrome.TFrame")
+        self.notebook.bind("<<NotebookTabChanged>>", self._page_changed)
+        self._page_changed()
+        footer = ttk.Frame(self, padding=(16, 2, 16, 10), style="Chrome.TFrame")
         footer.pack(fill="x")
         self.status = ttk.Label(footer, text="登录信息仅保存在本机；密码由 Mac 钥匙串保护。点击 ？ 查看大白话说明。", style="Chrome.TLabel", wraplength=830)
         self.status.pack(side="left", fill="x", expand=True)
         self.progress = ttk.Progressbar(footer, length=200, maximum=100)
         self.progress.pack(side="right", padx=(15, 0))
+
+    def _navigate(self, _=None):
+        selection = self.navigation_tree.selection()
+        if not selection:
+            return
+        page = selection[0]
+        current = self.notebook.select()
+        if page == "日常维护" and current in {str(self.pages["一键部署"]), str(self.pages["日常维护"])}:
+            return
+        if current != str(self.pages[page]):
+            self.notebook.select(self.pages[page])
+
+    def _page_changed(self, _=None):
+        selected = self.notebook.select()
+        page = next((name for name, frame in self.pages.items() if str(frame) == selected), "连接服务器")
+        group = "日常维护" if page == "一键部署" else page
+        if self.navigation_tree.selection() != (group,):
+            self.navigation_tree.selection_set(group)
+        self.workspace_title.configure(text=NAVIGATION[group])
+        if group == "日常维护":
+            self.application_tabs.pack(fill="x", padx=4, pady=(0, 8), before=self.notebook)
+            self.application_install.button.configure(style="Primary.TButton" if page == "一键部署" else "TButton")
+            self.application_manage.button.configure(style="Primary.TButton" if page == "日常维护" else "TButton")
+        else:
+            self.application_tabs.pack_forget()
+
+    def _render_sidebar(self):
+        if "server_tree" not in self.__dict__:
+            return
+        names = {"连接保持中": "在线", "连接正常": "在线", "正在自动重连": "重连", "正在连接": "连接中",
+                 "需核实服务器身份": "核实", "登录信息需检查": "认证", "连接未建立": "失败", "已手动断开": "断开"}
+        rows = [(p.identifier, (p.label, names.get(self.fleet_states.get(p.identifier, ("", ""))[0], "—"))) for p in self.profiles]
+        sync_tree(self.server_tree, rows)
+        hosts = len({server_key(p) for p in self.profiles})
+        self.server_count.configure(text=f"{hosts} 台服务器 · {len(self.profiles)} 个登录档案" if self.profiles else "尚未保存服务器")
+        identifier = self.current.identifier if self.current else None
+        if identifier and self.server_tree.exists(identifier):
+            if self.server_tree.selection() != (identifier,):
+                self.server_tree.selection_set(identifier)
+                self.server_tree.see(identifier)
+        elif self.server_tree.selection():
+            self.server_tree.selection_remove(*self.server_tree.selection())
+        self._server_context()
+
+    def _server_context(self):
+        if "current_server_label" not in self.__dict__:
+            return
+        c = self.current
+        text = c.label if c and c.host else "先添加或选择一台服务器"
+        if c and c.host and not self.privacy.get():
+            text += f" · {c.host}:{c.port} · {c.username}"
+        self.current_server_label.configure(text=text)
+
+    def _choose_sidebar_server(self, event=None):
+        if event is not None and event.type == tk.EventType.ButtonRelease and not self.server_tree.identify_row(event.y):
+            return
+        if self.busy:
+            self._render_sidebar()
+            self.status.configure(text="当前操作尚未结束，完成后再切换服务器。")
+            return
+        selection = self.server_tree.selection()
+        if selection:
+            self._activate_profile(selection[0])
+
+    def _activate_profile(self, identifier):
+        if self.busy:
+            return
+        profile = next((p for p in self.profiles if p.identifier == identifier), None)
+        if profile is None:
+            return
+        self._load_profile(self.sessions.get(identifier, profile))
+        kept = self._restore_connection_view(self.current)
+        if kept and self.report:
+            self.notebook.select(self.pages["服务器总览"])
+        else:
+            self.notebook.select(self.pages["连接服务器"])
+            self._connect()
+
+    def _clear_server_view(self):
+        self.report = None
+        self.report_server_key = None
+        self._clear_account_view()
+        if "statistics" not in self.__dict__:
+            return
+        self.system_label.configure(text="尚未读取当前服务器信息")
+        for value in self.statistics.values():
+            value.configure(text="—")
+        sync_tree(self.service_tree, [])
+        self.security_summary.configure(text="连接并检查后显示当前服务器的安全状态。")
+        self.protection_status.configure(text="连接并检查后显示当前服务器的安全状态。")
+        self._show_tasks([])
+        self._replace_text(self.task_text, "连接后查看当前服务器的操作记录。")
+        self.restore_id.set("")
+        for variable in [self.account_password, self.account_confirmation, self.new_username, self.plan_password, self.plan_phrase]:
+            variable.set("")
+
+    def _configure_project(self):
+        if self.busy:
+            return
+        self.deploy_choice.set(self.manage_choice.get())
+        self._deploy_defaults()
+        self.notebook.select(self.pages["一键部署"])
+
+    def _open_selected_project(self, _=None):
+        if self.busy:
+            return
+        selection = self.service_tree.selection()
+        if not selection or selection[0] not in SERVICES:
+            self.status.configure(text="先在项目列表中选择要管理的项目。")
+            return
+        kind = selection[0]
+        self.manage_choice.set(SERVICES[kind][0])
+        self._project_changed()
+        installed = any(unit.get("LoadState") == "loaded" for unit in (self.report or {}).get("services", {}).get(kind, []))
+        if (self.report or {}).get("project_information", {}).get(kind, {}).get("data", {}).get("uninstalled"):
+            installed = False
+        if installed:
+            self.notebook.select(self.pages["日常维护"])
+        else:
+            self._configure_project()
 
     def _button(self, parent, text, action, primary=False, track=True):
         button = HelpAction(parent, text, action, lambda: self._help(text), "Primary.TButton" if primary else "TButton")
@@ -271,7 +456,7 @@ class App(tk.Tk):
         choice = tk.StringVar(value=topic if topic in HELP else "使用说明")
         box = ttk.Combobox(frame, textvariable=choice, values=sorted(HELP), state="readonly", width=55)
         box.pack(fill="x", pady=15)
-        content = tk.Text(frame, wrap="word", relief="flat", padx=16, pady=16, font=(FONT, 14), bg="white")
+        content = tk.Text(frame, wrap="word", relief="flat", padx=12, pady=12, font="TkDefaultFont", bg="white")
         content.pack(fill="both", expand=True)
         def show(_=None):
             self._replace_text(content, choice.get() + "\n\n" + HELP[choice.get()])
@@ -280,17 +465,27 @@ class App(tk.Tk):
     def _description_plain(self, parent, title):
         ttk.Label(parent, text=title, style="Heading.TLabel").pack(anchor="w")
 
-    def _field(self, parent, row, label, variable, private=False, width=39):
-        self._help_label(parent, label).grid(row=row, column=0, sticky="e", padx=(0, 12), pady=6)
+    def _field(self, parent, row, label, variable, private=False, width=32):
+        self._help_label(parent, label).grid(row=row, column=0, sticky="e", padx=(0, 10), pady=4)
         entry = ttk.Entry(parent, textvariable=variable, width=width, show="•" if private and self.privacy.get() else "")
-        entry.grid(row=row, column=1, sticky="ew", pady=6)
+        entry.grid(row=row, column=1, sticky="ew", pady=4)
         if private:
             self.private_entries.append(entry)
         return entry
 
+    def _generate_password(self, variable, confirmation=None, private_key=False):
+        if self.__dict__.get("busy", False):
+            return
+        value = secrets.token_urlsafe(36 if private_key else 30)
+        variable.set(value)
+        if confirmation is not None:
+            confirmation.set(value)
+        if "status" in self.__dict__:
+            self.status.configure(text="已生成强随机口令，仅填入表单；确认执行后才生效。")
+
     def _description(self, parent, title, text):
         self._help_label(parent, title).pack(anchor="w")
-        ttk.Label(parent, text=text, style="Muted.TLabel", wraplength=1000, justify="left").pack(anchor="w", pady=(7, 16))
+        ttk.Label(parent, text=text, style="Muted.TLabel", wraplength=1000, justify="left").pack(anchor="w", pady=(5, 10))
 
     def _connection_page(self):
         page = self.pages["连接服务器"].content
@@ -317,7 +512,7 @@ class App(tk.Tk):
         self._field(form, 1, "服务器备注", self.label_var)
         self._field(form, 2, "服务器地址", self.host_var, True)
         self._field(form, 3, "登录账号", self.user_var, True)
-        self._field(form, 4, "SSH 端口", self.port_var)
+        self._field(form, 4, "SSH 端口（TCP）", self.port_var)
         self._help_label(form, "登录方式").grid(row=5, column=0, sticky="e", padx=(0, 12))
         auth_box = ttk.Combobox(form, textvariable=self.auth_var, values=["密码登录", "密钥登录"], state="readonly")
         auth_box.grid(row=5, column=1, sticky="w", pady=6)
@@ -335,7 +530,7 @@ class App(tk.Tk):
         self._button(actions, "保存连接档案", self._save_profile).pack(side="left", padx=12)
         self._button(actions, "VNC 登录排查", self._vnc_help).pack(side="left")
         self._button(actions, "重新确认服务器身份", self._reconfirm_identity).pack(side="left", padx=12)
-        ttk.Label(page, text="登录密码用于连接；修改系统密码和更改 SSH 登录方式在“账号与登录”中单独操作。", style="Muted.TLabel", wraplength=1000).pack(anchor="w", pady=8)
+        ttk.Label(page, text="这里填写已有密码和旧私钥口令，不生成替换。新系统密码可在“账号与登录”一键生成；新私钥口令在“安全防护”生成。", style="Muted.TLabel", wraplength=1000).pack(anchor="w", pady=8)
         self._auth_fields()
 
     def _auth_fields(self):
@@ -362,18 +557,13 @@ class App(tk.Tk):
             address = "已隐藏" if self.privacy.get() else profile.host + " / " + profile.username
             rows.append((profile.identifier, (profile.label, address, "密钥" if profile.auth == "key" else "密码", state, report.get("os", "—"), when)))
         sync_tree(self.fleet_tree, rows)
+        self._render_sidebar()
 
     def _switch_fleet(self):
         if self.busy: return
         selection = self.fleet_tree.selection()
         if selection:
-            profile = next((c for c in self.profiles if c.identifier == selection[0]), None)
-            if profile:
-                self._load_profile(self.sessions.get(profile.identifier, profile))
-                kept = self._restore_connection_view(self.current)
-                self.notebook.select(self.pages["连接服务器"])
-                if not kept:
-                    self.status.configure(text="登录信息已填好，请点击连接并检查。")
+            self._activate_profile(selection[0])
 
     def _check_fleet(self):
         profiles = [self.sessions.get(c.identifier, c) for c in self.profiles]
@@ -432,18 +622,21 @@ class App(tk.Tk):
         self.system_label = ttk.Label(top, text="连接后显示服务器信息", style="Heading.TLabel")
         self.system_label.pack(side="left", pady=10)
         cards = ttk.Frame(page)
-        cards.pack(fill="x", pady=(16, 22))
+        cards.pack(fill="x", pady=(10, 14))
         self.statistics = {}
         for index, (key, label) in enumerate([("disk", "可用磁盘"), ("memory", "可用内存"), ("services", "运行中的项目"), ("security", "SSH 登录方式")]):
-            card = ttk.Frame(cards, style="Card.TFrame", padding=16)
+            card = ttk.Frame(cards, style="Card.TFrame", padding=12)
             card.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 10, 0))
             cards.columnconfigure(index, weight=1)
             ttk.Label(card, text=label, style="Card.TLabel").pack(anchor="w")
             value = ttk.Label(card, text="—", style="Stat.TLabel")
-            value.pack(anchor="w", pady=(12, 3))
+            value.pack(anchor="w", pady=(8, 2))
             self.statistics[key] = value
         ttk.Label(page, text="项目与配套服务", style="Heading.TLabel").pack(anchor="w", pady=(0, 12))
         self.service_tree = self._tree(page, [("name", "项目", 185), ("status", "运行状态", 130), ("startup", "开机启动", 130), ("purpose", "作用", 460)], height=5)
+        self.service_tree.bind("<Double-1>", self._open_selected_project)
+        self.service_tree.bind("<Return>", self._open_selected_project)
+        self._button(page, "管理选中项目", self._open_selected_project).pack(anchor="w", pady=(12, 0))
         self.security_summary = ttk.Label(page, text="安全状态将在连接检查后显示。", style="Muted.TLabel", wraplength=1000, justify="left")
         self.security_summary.pack(anchor="w", pady=18)
 
@@ -452,11 +645,11 @@ class App(tk.Tk):
         self._description(page, "账号、密码和连接方式", "变更连接配置前备份；新连接通过验证后才完成切换。超级管理员账号保持不变，可创建普通管理员后切换使用。")
         server_row = ttk.Frame(page); server_row.pack(fill="x", pady=(0, 12))
         self._help_label(server_row, "账号所属服务器").pack(side="left", padx=(0, 12))
-        self.account_server_box = ttk.Combobox(server_row, state="readonly", width=52)
-        self.account_server_box.pack(side="left")
+        self.account_server_box = ttk.Combobox(server_row, state="readonly", width=36)
+        self.account_server_box.pack(side="left", fill="x", expand=True)
         self.account_server_box.bind("<<ComboboxSelected>>", self._choose_account_server)
-        self.account_server_status = ttk.Label(server_row, text="先连接服务器，再查看这台服务器的用户。", style="Muted.TLabel")
-        self.account_server_status.pack(side="left", padx=12)
+        self.account_server_status = ttk.Label(page, text="先连接服务器，再查看这台服务器的用户。", style="Muted.TLabel")
+        self.account_server_status.pack(anchor="w", pady=(0, 8))
         counts = ttk.Frame(page); counts.pack(fill="x", pady=6)
         self.account_count = ttk.Label(counts, text="连接后统计全部本机用户。")
         self.account_count.pack(side="left")
@@ -468,8 +661,8 @@ class App(tk.Tk):
         self._button(actions, "刷新用户列表", self._refresh_accounts).pack(side="left")
         self._button(actions, "查看选中账号详情", self._account_details).pack(side="left", padx=6)
         self._button(actions, "复制选中账号信息", self._copy_account).pack(side="left")
-        self._button(actions, "删除选中用户（保留文件）", self._delete_user).pack(side="left", padx=6)
-        self.account_detail_text = tk.Text(page, height=10, wrap="word", bg="white", foreground=INK, font=(FONT, 11), relief="flat", padx=14, pady=10, state="disabled")
+        self._button(page, "删除选中用户（保留文件）", self._delete_user).pack(anchor="w", pady=(0, 6))
+        self.account_detail_text = tk.Text(page, height=10, wrap="word", bg="white", foreground=INK, font="TkDefaultFont", relief="flat", padx=14, pady=10, state="disabled")
         self.account_detail_text.pack(fill="x", pady=6)
         self._replace_text(self.account_detail_text, "选中账号可以查看登录名、权限、登录策略和本机私钥位置。系统服务账号默认折叠，不能删除。")
         forms = ttk.Frame(page)
@@ -487,6 +680,7 @@ class App(tk.Tk):
         self._field(left, 0, "账号名", self.account_user, True, 24)
         self._field(left, 1, "新密码", self.account_password, True, 24)
         self._field(left, 2, "再次输入", self.account_confirmation, True, 24)
+        self._button(left, "生成密码", lambda: self._generate_password(self.account_password, self.account_confirmation)).grid(row=1, column=2, padx=12)
         self._field(left, 3, "改名后的账号", self.new_username, True, 24)
         self._check(left, "创建账号时配置本机专用密钥", self.install_key).grid(row=4, columnspan=2, sticky="w", pady=6)
         row = ttk.Frame(left); row.grid(row=5, columnspan=2, sticky="w", pady=10)
@@ -502,7 +696,7 @@ class App(tk.Tk):
         self.allow_root = tk.BooleanVar(value=False)
         self.replace_key = tk.BooleanVar(value=True)
         self._field(right, 0, "验证登录账号", self.ssh_account, True, 24)
-        self._field(right, 1, "SSH 端口", self.ssh_port, False, 24)
+        self._field(right, 1, "SSH 端口（TCP）", self.ssh_port, False, 24)
         self._check(right, "允许密码登录", self.allow_password).grid(row=2, columnspan=2, sticky="w", pady=7)
         self._check(right, "允许超级管理员直接登录", self.allow_root).grid(row=3, columnspan=2, sticky="w", pady=7)
         self._check(right, "添加本机专用密钥并验证", self.replace_key).grid(row=4, columnspan=2, sticky="w", pady=7)
@@ -510,10 +704,10 @@ class App(tk.Tk):
 
     def _security_page(self):
         page = self.pages["安全防护"].content
-        self._description(page, "常用安全设置", "优先使用一键方案。需要逐项调整时，再展开下方的自定义设置。")
+        self._help_label(page, "常用安全设置").pack(anchor="w", pady=(0, 8))
         self.protection_status = ttk.Label(page, text="先连接并检查服务器。", style="Muted.TLabel", wraplength=1000)
-        self.protection_status.pack(anchor="w", pady=(0, 14))
-        preset = ttk.LabelFrame(page, text="一键登录安全方案", padding=20); preset.pack(fill="x", pady=(0, 16))
+        self.protection_status.pack(anchor="w", pady=(0, 8))
+        preset = ttk.LabelFrame(page, text="一键登录安全方案", padding=12); preset.pack(fill="x", pady=(0, 8))
         ttk.Label(preset, text="推荐", style="Recommended.TLabel").grid(row=0, column=2, sticky="ne", padx=(24, 0))
         preset.columnconfigure(2, weight=1)
         self.plan_mode = tk.StringVar(value="修改现有用户名和密钥")
@@ -527,6 +721,8 @@ class App(tk.Tk):
         self._field(preset, 1, "目标账号名", self.plan_username, True, 32)
         self._field(preset, 2, "系统新密码（可留空）", self.plan_password, True, 32)
         self._field(preset, 3, "加密私钥口令（可留空）", self.plan_phrase, True, 32)
+        self._button(preset, "生成密码", lambda: self._generate_password(self.plan_password)).grid(row=2, column=2, sticky="w", padx=12)
+        self._button(preset, "生成口令", lambda: self._generate_password(self.plan_phrase, private_key=True)).grid(row=3, column=2, sticky="w", padx=12)
         self.plan_retire = tk.BooleanVar(value=True)
         self.plan_block = tk.BooleanVar(value=True)
         self.plan_fail2ban = tk.BooleanVar(value=True)
@@ -540,8 +736,8 @@ class App(tk.Tk):
             check.grid(row=i // 2, column=i % 2, sticky="w", pady=3, padx=(0, 20))
             self.plan_checks[label] = check.checkbox
         self.plan_hint = ttk.Label(preset, text="修改当前普通管理员；填写相同名字时，只更换加密密钥。", style="Muted.TLabel", wraplength=930)
-        self.plan_hint.grid(row=5, columnspan=3, sticky="w", pady=(10, 4))
-        ttk.Label(preset, text="仅允许密钥登录 · 私钥与口令仅存本机 · 保留端口与现有地址规则", style="Muted.TLabel", wraplength=930).grid(row=6, columnspan=3, sticky="w", pady=(0, 12))
+        self.plan_hint.grid(row=5, columnspan=3, sticky="w", pady=(6, 4))
+        ttk.Label(preset, text="仅允许密钥登录 · 私钥与口令仅存本机 · 保留端口与现有地址规则", style="Muted.TLabel", wraplength=930).grid(row=6, columnspan=3, sticky="w", pady=(0, 6))
         self.plan_apply = self._button(preset, "预览并应用一键安全方案", self._apply_security_plan, True)
         self.plan_apply.grid(row=7, columnspan=2, sticky="w", pady=(0, 3))
         custom_header = ttk.Frame(page, padding=(0, 8, 0, 8)); custom_header.pack(fill="x")
@@ -554,7 +750,7 @@ class App(tk.Tk):
         row = ttk.Frame(custom); row.pack(fill="x", pady=(12, 14))
         self._button(row, "启用防火墙并保留现有规则", self._firewall).pack(side="left")
         self._button(row, "开启自动安全更新", self._updates).pack(side="left", padx=10)
-        ssh = ttk.LabelFrame(custom, text="SSH 连接防护", padding=20); ssh.pack(fill="x", pady=8)
+        ssh = ttk.LabelFrame(custom, text="SSH 连接防护", padding=12); ssh.pack(fill="x", pady=8)
         self.auth_tries = tk.StringVar(value="3")
         self.login_grace = tk.StringVar(value="120")
         self.alive_interval = tk.StringVar(value="0")
@@ -566,7 +762,7 @@ class App(tk.Tk):
         for index, (label, variable) in enumerate([("允许 SSH 隧道转发", self.tcp_forwarding), ("允许图形界面转发", self.x11_forwarding), ("允许转交本机密钥代理", self.agent_forwarding)], start=3):
             self._check(ssh, label, variable).grid(row=index, columnspan=2, sticky="w", pady=5)
         self._button(ssh, "应用 SSH 防护设置", self._harden_ssh, True).grid(row=6, columnspan=2, sticky="w", pady=10)
-        jail = ttk.LabelFrame(custom, text="防猜密码保护", padding=20); jail.pack(fill="x", pady=8)
+        jail = ttk.LabelFrame(custom, text="防猜密码保护", padding=12); jail.pack(fill="x", pady=8)
         self.ban_attempts = tk.StringVar(value="5")
         self.ban_window = tk.StringVar(value="10")
         self.ban_duration = tk.StringVar(value="60")
@@ -618,8 +814,11 @@ class App(tk.Tk):
             row = ttk.Frame(form); row.grid(row=index, column=0, columnspan=2, sticky="w")
             row.columnconfigure(0, minsize=190)
             self._field(row, 0, label, variable, private)
+            if name == "port":
+                self.deploy_port_protocol = ttk.Label(row, text="TCP（网页入口）")
+                self.deploy_port_protocol.grid(row=0, column=2, sticky="w", padx=12)
             if name.endswith("password"):
-                self._button(row, "生成密码", lambda: self.deploy_password.set(secrets.token_urlsafe(20))).grid(row=0, column=2, padx=12)
+                self._button(row, "生成密码", lambda: self._generate_password(self.deploy_password)).grid(row=0, column=2, padx=12)
             self.deploy_rows[name] = row
         self.deploy_optional_open = False
         self.deploy_optional_header = ttk.Frame(page)
@@ -636,6 +835,8 @@ class App(tk.Tk):
             row = ttk.Frame(self.deploy_optional_frame); row.grid(row=index, column=0, sticky="w")
             row.columnconfigure(0, minsize=190)
             self._field(row, 0, label, variable, private)
+            if name == "backend":
+                ttk.Label(row, text="TCP · 仅本机，不向公网开放", style="Muted.TLabel").grid(row=0, column=2, sticky="w", padx=12)
             self.deploy_optional_rows[name] = row
         version_row = ttk.Frame(self.deploy_optional_frame); version_row.grid(row=2, column=0, sticky="w")
         version_row.columnconfigure(0, minsize=190)
@@ -654,8 +855,10 @@ class App(tk.Tk):
         actions = ttk.Frame(page); actions.pack(fill="x")
         self._button(actions, "预览并部署", self._deploy, True).pack(side="left")
         self._button(actions, "查看访问 / 连接信息", self._details).pack(side="left", padx=12)
-        self.deploy_network_hint = ttk.Label(page, text="自动申请证书需要云平台放行 TCP 80。云平台安全组与服务器防火墙是两项独立设置。", style="Muted.TLabel", wraplength=1000)
+        self.deploy_network_hint = ttk.Label(page, style="Muted.TLabel", wraplength=1000, justify="left")
         self.deploy_network_hint.pack(anchor="w", pady=18)
+        self.deploy_port.trace_add("write", self._deploy_network_changed)
+        self.deploy_backend.trace_add("write", self._deploy_network_changed)
         self._deployment_fields()
 
     def _maintenance_page(self):
@@ -667,9 +870,11 @@ class App(tk.Tk):
         project_box = ttk.Combobox(top, textvariable=self.manage_choice, values=[v[0] for v in SERVICES.values()], state="readonly", width=28)
         project_box.pack(side="left")
         project_box.bind("<<ComboboxSelected>>", self._project_changed)
-        self._button(top, "刷新项目信息", self._refresh_project_info).pack(side="left", padx=12)
-        self._button(top, "查看运行日志", self._logs).pack(side="left", padx=12)
-        information = ttk.LabelFrame(page, text="项目信息 · 可直接复制使用", padding=16); information.pack(fill="x", pady=(18, 8))
+        actions = ttk.Frame(page); actions.pack(fill="x", pady=(12, 0))
+        self._button(actions, "刷新项目信息", self._refresh_project_info).pack(side="left")
+        self._button(actions, "查看运行日志", self._logs).pack(side="left", padx=12)
+        self._button(actions, "安装 / 调整配置", self._configure_project).pack(side="left")
+        information = ttk.LabelFrame(page, text="项目信息 · 可直接复制使用", padding=12); information.pack(fill="x", pady=(12, 8))
         self.project_info_tree = self._tree(information, [("name", "信息", 240), ("value", "内容", 720)], height=9)
         self.project_info_tree.bind("<<TreeviewSelect>>", self._select_project_info)
         self.project_info_value = tk.StringVar()
@@ -682,17 +887,20 @@ class App(tk.Tk):
         row = ttk.Frame(page); row.pack(fill="x", pady=18)
         for title, action in [("启动", "start"), ("停止", "stop"), ("重启", "restart"), ("开启开机启动", "enable"), ("关闭开机启动", "disable")]:
             self._button(row, title, lambda a=action: self._service(a)).pack(side="left", padx=(0, 9))
-        security = ttk.LabelFrame(page, text="安全与配置备份", padding=16); security.pack(fill="x", pady=8)
-        self._button(security, "启用防火墙并保留现有规则", self._firewall).pack(side="left", padx=(0, 10))
-        self._button(security, "开启自动安全更新", self._updates).pack(side="left", padx=(0, 10))
-        self._button(security, "备份所选服务配置", self._backup).pack(side="left", padx=(0, 10))
-        self._button(security, "备份安全配置", lambda: self._backup("security")).pack(side="left")
+        removal = ttk.Frame(page); removal.pack(fill="x", pady=(0, 8))
+        self._button(removal, "卸载所选项目", self._uninstall).pack(side="left")
+        ttk.Label(removal, text="移除程序和专属服务，默认保留配置、账号及业务数据。", style="Muted.TLabel", wraplength=640).pack(side="left", padx=12)
+        security = ttk.LabelFrame(page, text="安全与配置备份", padding=12); security.pack(fill="x", pady=8)
+        self._button(security, "备份所选服务配置", self._backup).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 8))
+        self._button(security, "备份安全配置", lambda: self._backup("security")).grid(row=0, column=1, sticky="w", pady=(0, 8))
+        self._button(security, "启用防火墙并保留现有规则", self._firewall).grid(row=1, column=0, sticky="w", padx=(0, 10))
+        self._button(security, "开启自动安全更新", self._updates).grid(row=1, column=1, sticky="w")
         restore = ttk.Frame(page); restore.pack(fill="x", pady=18)
         self._help_label(restore, "备份编号").pack(side="left", padx=(0, 10))
         self.restore_id = tk.StringVar()
         ttk.Entry(restore, textvariable=self.restore_id, width=32).pack(side="left")
         self._button(restore, "预览并恢复配置", self._restore).pack(side="left", padx=12)
-        self.maintenance_text = tk.Text(page, height=11, wrap="word", bg="white", foreground=INK, font=(FONT, 11), relief="flat", padx=14, pady=14, state="disabled")
+        self.maintenance_text = tk.Text(page, height=11, wrap="word", bg="white", foreground=INK, font="TkDefaultFont", relief="flat", padx=14, pady=14, state="disabled")
         self.maintenance_text.pack(fill="both", expand=True)
         self._replace_text(self.maintenance_text, "服务日志会在这里显示。\n备份保存在服务器，仅管理员可读取。恢复前会再备份当前配置。\n业务系统的账号、交易账本及运行数据使用其自身备份机制。")
 
@@ -703,8 +911,9 @@ class App(tk.Tk):
         self._button(row, "刷新记录", self._tasks).pack(side="left")
         self._button(row, "查看任务详情", self._task_detail).pack(side="left", padx=10)
         self._button(row, "恢复待验证变更", self._recover).pack(side="left")
+        self._button(row, "查看本次新密码", self._task_password).pack(side="left", padx=10)
         self.task_tree = self._tree(page, [("id", "任务编号", 235), ("operation", "操作", 145), ("state", "状态", 160), ("message", "结果", 440)], height=7)
-        self.task_text = tk.Text(page, height=9, wrap="word", bg="white", foreground=INK, font=(FONT, 11), relief="flat", padx=14, pady=14, state="disabled")
+        self.task_text = tk.Text(page, height=9, wrap="word", bg="white", foreground=INK, font="TkDefaultFont", relief="flat", padx=14, pady=14, state="disabled")
         self.task_text.pack(fill="both", expand=True, pady=(15, 0))
 
     def _tree(self, parent, columns, height):
@@ -756,6 +965,8 @@ class App(tk.Tk):
         self._run(lambda:self._inspect_and_save(c,profiles),lambda report:self._connected(c,report,select_page=False),"正在读取所选服务器的用户和策略…")
 
     def _choose_profile(self, _=None):
+        if self.busy:
+            return
         index = self.profile_box.current()
         if 0 <= index < len(self.profiles):
             self._load_profile(self.sessions.get(self.profiles[index].identifier, self.profiles[index]))
@@ -806,9 +1017,9 @@ class App(tk.Tk):
             return
         identifier = self.current.identifier
         self.controller.disconnect_connection(identifier)
-        self.report = None
-        self.report_server_key = None
-        self._clear_account_view()
+        self._clear_server_view()
+        if "project_info_tree" in self.__dict__:
+            self._project_changed()
         self.fleet_states[identifier] = ("已手动断开", datetime.datetime.now().strftime("%H:%M:%S"))
         self._render_fleet()
         self._show_connection_state("disconnected")
@@ -816,11 +1027,8 @@ class App(tk.Tk):
 
     def _load_profile(self, c):
         previous = self.current
-        if previous is None or server_key(previous) != server_key(c):
-            self.report = None
-            self.report_server_key = None
-            if "account_server_box" in self.__dict__:
-                self._clear_account_view()
+        if previous is None or server_key(previous) != server_key(c) or previous.identifier != c.identifier:
+            self._clear_server_view()
         self.current = c
         for variable, value in [(self.label_var, c.label), (self.host_var, c.host), (self.user_var, c.username), (self.port_var, str(c.port)), (self.key_var, c.key_path), (self.password_var, c.password), (self.passphrase_var, c.key_passphrase), (self.sudo_var, c.sudo_password)]:
             variable.set(value)
@@ -838,12 +1046,19 @@ class App(tk.Tk):
             if saved.identifier == c.identifier:
                 self.profile_box.current(index)
                 break
+        self._sync_deployment_server(c)
+        if not self.report:
+            self.deployment_context = None
+        self._render_sidebar()
 
     def _new_profile(self):
+        if self.busy:
+            return
         self._load_profile(Connection())
         self.profile_choice.set("")
         self.report = None
         self.connection_badge.configure(text="● 尚未连接", foreground=MUTED)
+        self.notebook.select(self.pages["连接服务器"])
 
     def _connection(self):
         c = Connection(label=self.label_var.get().strip() or "我的服务器", host=self.host_var.get(), username=self.user_var.get().strip(), port=validate_port(self.port_var.get()), auth="key" if self.auth_var.get() == "密钥登录" else "password", password=self.password_var.get(), key_path=self.key_var.get(), key_passphrase=self.passphrase_var.get(), sudo_password=self.sudo_var.get(), identifier=self.current.identifier if self.current else Connection().identifier, remember=self.remember_var.get())
@@ -1009,18 +1224,33 @@ class App(tk.Tk):
                     callback(value)
         except queue.Empty:
             pass
+        finally:
+            # Tk reports callback failures; keep processing later task results.
+            self.after(40 if self.busy or not self.events.empty() else 100, self._drain)
         if latest_progress is not None: show_progress(latest_progress)
-        self.after(40 if self.busy or not self.events.empty() else 100, self._drain)
 
     def report_callback_exception(self, exception, value, traceback):
-        # Tk's default traceback can reveal local credential paths.
-        messagebox.showerror("操作未完成", "界面操作未完成，请重新检查输入或查看任务状态。", parent=self)
+        # Record locations only: exception values and source lines can contain secrets.
+        from traceback import extract_tb
+        from .models import atomic_private
+        diagnostic = {"type": exception.__name__, "frames": [
+            {"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+            for frame in extract_tb(traceback)
+        ]}
+        note = "诊断已保存到本机 ui-error.json（不含账号或口令）。"
+        try:
+            atomic_private(self.store.directory / "ui-error.json", json.dumps(diagnostic, ensure_ascii=False))
+        except OSError:
+            note = "本机诊断未能保存，请检查数据目录权限。"
+        messagebox.showerror("操作未完成", "界面操作未完成，请重新检查输入或查看任务状态。\n\n" + note, parent=self)
 
     def _redactor(self):
         c = self.current
         return Redactor(*(c.__dict__[key] for key in ["host", "username", "password", "key_path", "key_passphrase", "sudo_password"])) if c else Redactor()
 
     def _connect(self):
+        if self.busy:
+            return
         try:
             c = self._connection()
         except ManagerError as error:
@@ -1098,7 +1328,7 @@ class App(tk.Tk):
         self.system_label.configure(text=r["os"] + " · " + r["architecture"])
         self.statistics["disk"].configure(text=readable_size(r["disk_free"]))
         self.statistics["memory"].configure(text=readable_size(r["memory"].get("MemAvailable", 0)))
-        count = sum(any(u.get("ActiveState") == "active" for u in units) for units in r["services"].values())
+        count = sum(any(u.get("ActiveState") == "active" for u in units) and not r.get("project_information", {}).get(key, {}).get("data", {}).get("uninstalled") for key, units in r["services"].items())
         self.statistics["services"].configure(text=str(count))
         password_enabled = "yes" in r["ssh"].get("passwordauthentication", [])
         self.statistics["security"].configure(text="密码 / 密钥" if password_enabled else "密钥")
@@ -1110,11 +1340,14 @@ class App(tk.Tk):
             installed = [u for u in units if u.get("LoadState") == "loaded"]
             state = "运行中" if any(u.get("ActiveState") == "active" for u in installed) else "已停止" if installed else "尚未安装"
             startup = "已开启" if any(u.get("UnitFileState") == "enabled" for u in installed) else "未开启" if installed else "—"
+            if r.get("project_information", {}).get(key, {}).get("data", {}).get("uninstalled"):
+                state = "独立站点已卸载" if key == "nginx" else "已卸载（数据保留）"
+                startup = "—"
             service_rows.append((key, (SERVICES[key][0], state, startup, purposes[key])))
         sync_tree(self.service_tree, service_rows)
         self._render_accounts()
         root_allowed = "yes" in r["ssh"].get("permitrootlogin", [])
-        summary = "防火墙：" + ("已启用" if r["firewall"]["active"] else "未启用") + "    安全更新：" + ("已运行" if r["automatic_updates"] else "未运行") + "    超级管理员 SSH 密码登录：" + ("允许" if root_allowed and password_enabled else "禁止")
+        summary = "防火墙：" + ("已启用" if r["firewall"]["active"] else "未启用") + "    安全更新：" + ("已启用" if r["automatic_updates"] else "未就绪") + "    超级管理员 SSH 密码登录：" + ("允许" if root_allowed and password_enabled else "禁止")
         self.security_summary.configure(text=summary + ("\n当前系统暂不支持自动部署；仍可检查已安装服务。" if not r["supported"] else ""))
         self.protection_status.configure(text=summary + "    防猜密码：" + ("已启用" if r.get("fail2ban", {}).get("active") else "未启用本程序保护"))
         for variable, field, default in [(self.auth_tries, "maxauthtries", "3"), (self.login_grace, "logingracetime", "120"), (self.alive_interval, "clientaliveinterval", "0")]:
@@ -1320,6 +1553,12 @@ class App(tk.Tk):
                 if profile.host == c.host:
                     self.fleet_reports.pop(profile.identifier, None)
                     self.fleet_states[profile.identifier] = ("配置已变更，请重新检查", "—")
+            if params["operation"] == "uninstall":
+                identities = {server_key(profile) for profile in [c, updated, *self.profiles] if profile.host == c.host}
+                for identity in identities:
+                    self.project_details.pop((identity, params["service"]), None)
+                    self.project_logs.pop((identity, params["service"]), None)
+                self.deployment_context = None
             self._persist_profile(updated); self._load_profile(updated)
             self.report = None
             self.connection_badge.configure(text="● 已验证，待刷新", foreground="#27805e")
@@ -1331,7 +1570,7 @@ class App(tk.Tk):
                 self.restore_id.set(result["backup_id"])
             self._show_tasks([status] + self.latest_tasks)
             self.notebook.select(self.pages["操作记录"])
-            messagebox.showinfo("操作完成", "操作已完成。可以刷新总览，或查看访问 / 连接信息。", parent=self)
+            messagebox.showinfo("操作完成", "项目已卸载，配置、账号和业务数据保留。共享依赖与防火墙规则未删除；移除文件的恢复备份仍占磁盘空间。" if params["operation"] == "uninstall" else "操作已完成。可以刷新总览，或查看访问 / 连接信息。", parent=self)
             profiles = list(self.profiles)
             if params["operation"] == "deploy": self.deployment_context = None
             self._run(lambda: self._inspect_and_save(updated, profiles), lambda report: self._connected(updated, report), "刷新配置后的状态…")
@@ -1363,6 +1602,8 @@ class App(tk.Tk):
                     raise ManagerError("账号改名需先以该账号连接，程序才能自动验证新登录身份。")
                 params.update(old_username=account, new_username=validate_user(self.new_username.get().strip()))
             description = {"create_admin": "创建普通管理员，设置系统密码和本机密钥，验证可登录及使用 sudo。", "password": "修改所选账号的系统密码；SSH 登录方式保持原设置。", "rename_user": "原地修改普通账号名和家目录，保留 UID、权限和密钥。若该账号运行业务进程，程序会停止改名。"}[operation]
+            if operation in {"create_admin", "password"}:
+                description += "\n本次新密码副本单独保存到本机钥匙串（不受记住登录开关影响），可在操作记录查看；保存失败不执行。"
             self._execute(params, description)
         except ManagerError as error:
             messagebox.showerror("检查输入", str(error), parent=self)
@@ -1462,7 +1703,7 @@ class App(tk.Tk):
             self.deploy_username.set("manager")
             self.deploy_backend.set("18880")
         self._deployment_fields()
-        hints = {"exchange": "确认服务端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写端口和服务密码。已有项目会按新条件调整；原密码不变时可以留空。", "xui": "填写端口、面板账号和密码。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
+        hints = {"exchange": "确认 TCP 网页端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写 UDP 节点端口和服务密码；HY2 不使用 TCP 节点端口。已有项目会按新条件调整；原密码不变时可以留空。", "xui": "填写 TCP 面板端口、面板账号和密码；节点端口另按各自协议放行。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
         self.deploy_hint.configure(text=hints[key])
 
     def _deployment_current(self, key):
@@ -1470,7 +1711,7 @@ class App(tk.Tk):
         if c is None or self.__dict__.get("report_server_key") != server_key(c): return {}
         information = self.__dict__.get("project_details", {}).get((server_key(c), key), {})
         data = information.get("data", {})
-        return data if data.get("installed") and (key != "nginx" or data.get("config_file")) else {}
+        return data if (data.get("installed") or data.get("uninstalled")) and (key != "nginx" or data.get("config_file")) else {}
 
     def _sync_deployment_server(self, c):
         if "deploy_choice" in self.__dict__ and self.__dict__.get("deployment_context") != server_key(c):
@@ -1490,7 +1731,14 @@ class App(tk.Tk):
         if self.deploy_optional_open:
             self.deploy_optional_frame.pack(fill="x", pady=(8, 0), before=self.deploy_hint)
         self.deploy_network_hint.pack(anchor="w", pady=18)
+        self._deploy_network_changed()
         self._version_fields()
+
+    def _deploy_network_changed(self, *_):
+        key = self._service_key(self.deploy_choice.get())
+        purpose = "HY2 节点" if key == "hysteria2" else "面板网页" if key == "xui" else "网页入口"
+        self.deploy_port_protocol.configure(text=SERVICE_PROTOCOLS[key]+"（"+purpose+"）")
+        self.deploy_network_hint.configure(text=deployment_network_hint(key, self.deploy_port.get().strip(), self.deploy_backend.get().strip()))
 
     def _toggle_deploy_optional(self):
         self.deploy_optional_open = not self.deploy_optional_open
@@ -1549,14 +1797,14 @@ class App(tk.Tk):
             params["deployment_fingerprint"] = plan["fingerprint"]
             self.deploy_version.set(plan["version"])
             names = {"install":"首次安装", "reconfigure":"调整现有配置", "update":"切换软件版本", "repair":"保留数据并修复安装", "retry":"重新准备未完成的首次安装", "unchanged":"条件相同，无需重复安装"}
-            lines = [SERVICES[params["service"]][0] + "：" + names[plan["action"]], "目标版本：" + plan["version"]]
+            lines = [SERVICES[params["service"]][0] + "：" + ("重新安装（沿用保留的数据）" if plan.get("reinstall") else names[plan["action"]]), "目标版本：" + plan["version"]]
             for item in plan["changes"]:
                 lines.append(item["name"] + "：" + str(item["before"] or "未设置") + " → " + str(item["after"]))
             if plan["installed"] and plan["action"] != "unchanged": lines.append("先备份原配置；保留现有账号、节点和业务数据。新配置验证失败时恢复原项目。")
             if params["service"] == "exchange" and plan["installed"] and plan["action"] not in {"unchanged", "retry"}:
                 lines.append("开始即确认：你已在交易网页停止交易并完成撤单与清理，再进行本次维护。")
                 params["maintenance_confirmed"] = True
-            lines.append("新业务端口还需在云平台安全组放行。")
+            lines.append(deployment_network_hint(params["service"], params["port"], params.get("backend_port")))
             self._execute(params, "\n".join(lines))
         self._run(lambda:self.controller.deployment_preview(c, params), done, "比对现有项目与填写的新部署条件…")
 
@@ -1571,8 +1819,9 @@ class App(tk.Tk):
         dialog = tk.Toplevel(self); dialog.title(title); dialog.geometry("620x180"); dialog.transient(self)
         frame = ttk.Frame(dialog, padding=20); frame.pack(fill="both", expand=True)
         ttk.Label(frame, text=title, style="Heading.TLabel").pack(anchor="w")
-        variable = tk.StringVar(value=value)
+        variable = tk.StringVar(dialog, value=value)
         entry = ttk.Entry(frame, textvariable=variable, show="•", width=70); entry.pack(fill="x", pady=16)
+        entry.variable = variable
         actions = ttk.Frame(frame); actions.pack(fill="x")
         self._button(actions, "显示 / 隐藏", lambda: entry.configure(show="" if entry.cget("show") else "•"), track=False).pack(side="left")
         self._button(actions, "复制", lambda: self._copy(value), track=False).pack(side="left", padx=10)
@@ -1588,7 +1837,34 @@ class App(tk.Tk):
         if key == "exchange" and action in {"stop", "restart"}:
             if not messagebox.askyesno("确认维护条件", "请先在交易网页停止任务并确认撤单及清理完成。\n是否已经完成？", parent=self): return
             params["maintenance_confirmed"] = True
-        self._execute(params, "对“" + SERVICES[key][0] + "”执行所选服务管理操作。")
+        description = "对“" + SERVICES[key][0] + "”执行所选服务管理操作。"
+        if key == "nginx":
+            description += "\n仅操作 nginx.service 共享核心，会影响该核心下的其他网站；不操作交易系统的专属网页入口。"
+        self._execute(params, description)
+
+    def _uninstall(self):
+        if self.busy or not self._ready(): return
+        c = self.current; kind = self._service_key(self.manage_choice.get())
+        params = {"operation": "uninstall", "service": kind, "keep_data": True}
+        def done(plan):
+            if not self.current or server_key(self.current) != server_key(c):
+                self.status.configure(text="服务器已切换，请重新预览卸载。")
+                return
+            if plan["action"] == "unchanged":
+                messagebox.showinfo("卸载项目", "这个项目已经卸载，保留的数据不会清空。", parent=self)
+                return
+            params["uninstall_fingerprint"] = plan["fingerprint"]
+            lines = ["目标服务器：" + c.label, "卸载项目：" + SERVICES[kind][0], plan["message"], "移除范围：\n" + "\n".join(plan["remove_paths"]), "保留目录：\n" + "\n".join(plan["retained_paths"]), "不删除 SSH 账号、本机口令、共享证书与续期工具、系统依赖或防火墙规则。", "移除文件保存在服务器管理员专用任务目录，用于失败恢复，仍占磁盘空间；重要业务数据须单独安全备份。"]
+            if kind == "exchange":
+                lines.append("确认开始即表示：已在交易网页停止所有交易，完成撤单和清理。本程序不能代替你核对订单；无法确认请取消。")
+                params["maintenance_confirmed"] = True
+            self._replace_text(self.maintenance_text, "\n\n".join(lines))
+            unit_paths = [name for name in plan["remove_paths"] if name.startswith("/etc/systemd/system/")]
+            files = [name for name in plan["remove_paths"] if name not in unit_paths]
+            summary = lines[:3] + ["移除文件 / 目录：\n" + "\n".join(files), "同时移除 " + str(len(unit_paths)) + " 项专属服务 / 定时器定义，完整范围见下方预览。", "保留目录：\n" + "\n".join(plan["retained_paths"]), lines[5], lines[6]]
+            if kind == "exchange": summary.append(lines[-1])
+            self._execute(params, "\n".join(summary))
+        self._run(lambda: self.controller.uninstall_preview(c, params), done, "检查所选项目的卸载范围与共享依赖…")
 
     def _logs(self):
         if not self._ready(): return
@@ -1611,7 +1887,7 @@ class App(tk.Tk):
         information = self.project_details.get((identity,key), {})
         self.project_rows = list(information.get("rows", []))
         hidden = self.privacy.get()
-        sync_tree(self.project_info_tree, [(str(i),(name,"已隐藏；关闭右上角隐藏开关可查看" if hidden and name not in {"项目状态","安装版本"} else value)) for i,(name,value) in enumerate(self.project_rows)])
+        sync_tree(self.project_info_tree, [(str(i),(name,"已隐藏；关闭右上角隐藏开关可查看" if hidden and name not in {"项目状态","安装版本","端口协议"} else value)) for i,(name,value) in enumerate(self.project_rows)])
         self.project_info_value.set("")
         if not self.project_rows:
             sync_tree(self.project_info_tree, [("placeholder",("项目信息","连接服务器后点击刷新；只显示当前服务器的项目。"))])
@@ -1674,10 +1950,12 @@ class App(tk.Tk):
     def _firewall(self):
         if not self._ready(): return
         ports = [{"port": x["port"], "protocol": x["protocol"]} for x in self.report["listeners"] if not x["local_only"] and x["port"] in {self.current.port, 80, 443, 26483, 51752, 2053, 30043}]
-        self._execute({"operation": "firewall", "ssh_port": self.current.port, "ports": ports}, "开启服务器防火墙，保留现有规则，放行 SSH 与检测到的常用业务端口。\n新连接验证失败会自动恢复原防火墙配置。")
+        rules = sorted({(self.current.port, "tcp")} | {(item["port"], item["protocol"]) for item in ports})
+        listing = "\n".join(f"• {protocol.upper()} {number}" for number, protocol in rules)
+        self._execute({"operation": "firewall", "ssh_port": self.current.port, "ports": ports}, "开启服务器防火墙，保留现有规则，本次放行：\n"+listing+"\n未列出的自定义端口需已有放行规则；云平台安全组需按对应协议另行设置。\n新连接验证失败会自动恢复原防火墙配置。")
 
     def _updates(self):
-        self._execute({"operation": "updates", "enabled": True}, "开启自动安全更新；自动重启保持关闭。")
+        self._execute({"operation": "updates", "enabled": True}, "开启系统自动安全更新并验证定时调度；从下一次计划开始，不立即补跑升级，自动重启保持关闭。")
 
     def _backup(self, kind=None):
         key = kind or self._service_key(self.manage_choice.get())
@@ -1698,9 +1976,9 @@ class App(tk.Tk):
         for task in tasks:
             if task["id"] in seen: continue
             seen.add(task["id"]); self.latest_tasks.append(task)
-            names = {"deploy": "服务部署", "create_admin": "创建管理员", "rename_user": "账号改名", "password": "修改密码", "ssh": "SSH 设置", "firewall": "防火墙", "updates": "安全更新", "backup": "配置备份", "restore": "配置恢复", "service": "服务管理", "account_access": "账号登录限制", "delete_user": "删除用户并保留文件", "ssh_hardening": "SSH 连接防护", "fail2ban": "防猜密码保护"}
+            names = {"deploy": "服务部署", "uninstall": "项目卸载（保留数据）", "create_admin": "创建管理员", "rename_user": "账号改名", "password": "修改密码", "ssh": "SSH 设置", "firewall": "防火墙", "updates": "安全更新", "backup": "配置备份", "restore": "配置恢复", "service": "服务管理", "account_access": "账号登录限制", "delete_user": "删除用户并保留文件", "ssh_hardening": "SSH 连接防护", "fail2ban": "防猜密码保护"}
             names.update(prepare_key="安装并验证加密密钥", login_policy="仅密钥登录策略", retire_key="撤销原档案旧钥匙")
-            states = {"queued": "排队中", "running": "执行中", "awaiting_verification": "等待连接验证", "succeeded": "已完成", "failed": "未完成", "rolled_back": "已恢复原配置", "recovery_failed": "恢复未完成，需处理"}
+            states = {"queued": "排队中", "running": "执行中", "awaiting_verification": "等待连接验证", "succeeded": "已完成", "failed": "未完成", "rolled_back": "已恢复原配置", "recovery_failed": "恢复未完成，需处理", "submission_unknown": "提交未确认"}
             rows.append((task["id"], (task["id"], names.get(task["operation"], task["operation"]), states.get(task["state"], task["state"]), self._redactor().text(task["message"]))))
         sync_tree(self.task_tree, rows)
 
@@ -1713,12 +1991,46 @@ class App(tk.Tk):
         if task.get("diagnostic"): text += "\n" + task["diagnostic"]
         self._replace_text(self.task_text, self._redactor().text(text))
 
+    def _task_password(self):
+        if self.busy or not self.current:
+            return
+        selected = self.task_tree.selection()
+        if not selected:
+            c = self.current
+            def listed(data):
+                self._show_tasks(data["tasks"])
+                self.status.configure(text="已列出本机保存的新密码记录；选中一条后再次点击「查看本次新密码」。" if data["tasks"] else "当前服务器没有可查看的新密码副本。旧版本记录不会补生成密码。")
+            self._run(lambda: self.controller.saved_password_tasks(c), listed, "读取当前服务器的本机密码记录…")
+            return
+        task = next((item for item in self.latest_tasks if item["id"] == selected[0]), None)
+        if not task or task.get("operation") not in {"create_admin", "password"}:
+            messagebox.showinfo("本次新密码", "请选中创建管理员或修改密码的操作记录。", parent=self)
+            return
+        identifier = task["id"]; c = self.current
+        def worker():
+            from .vault import vault_alias
+            saved = self.store.vault.get(vault_alias("task-password", identifier))
+            return saved.get("password", "") if saved.get("host") == c.host else ""
+        def done(value):
+            if not value:
+                messagebox.showinfo("本次新密码", "这条操作没有本机口令副本，或账号已删除。旧版本的记录不会补生成密码。", parent=self)
+                return
+            self._secret_dialog("本次设置的新密码（是否生效请核对任务结果）", value)
+        self._run(worker, done, "读取本机钥匙串中的本次新密码…")
+
     def _recover(self):
         if not self._ready(): return
         selection = self.task_tree.selection()
         if not selection: return
         identifier = selection[0]; c = self.current
-        if not messagebox.askyesno("恢复变更", "恢复该任务变更前的配置，仅适用于等待验证的连接变更。", parent=self): return
+        task = next((item for item in self.latest_tasks if item["id"] == identifier), {})
+        if task.get("operation") == "uninstall":
+            description = "恢复异常中断或恢复未完成的卸载，找回移除的项目文件并恢复原服务状态；不会覆盖新安装或清空业务数据。已完成卸载不能用此按钮撤销。"
+        elif task.get("operation") == "deploy":
+            description = "仅对异常中断或恢复未完成的部署，按原任务备份恢复项目、配置和服务状态；可能短暂停机。交易系统请先停止交易并完成撤单与清理。已完成部署不能用此按钮撤销。"
+        else:
+            description = "恢复该任务变更前的配置，仅适用于等待验证的连接变更。"
+        if not messagebox.askyesno("恢复变更", description, parent=self): return
         self._run(lambda: self.controller.transport(c).call({"action": "recover", "task_id": identifier}), lambda task: self._show_tasks([task] + self.latest_tasks))
 
     def _replace_text(self, widget, text):
@@ -1746,6 +2058,7 @@ def main():
         raise SystemExit(answer_askpass())
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument("--development-profile", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--desktop-data", action="store_true", help="源码运行时使用原桌面版的本机档案和钥匙串")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--check-release", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ui-check", action="store_true", help=argparse.SUPPRESS)

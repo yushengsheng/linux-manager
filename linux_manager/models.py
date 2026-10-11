@@ -14,7 +14,7 @@ SERVICES = {
     "exchange": ("小军交易系统", ("xiaojun-exchange-web.service", "xiaojun-exchange-worker.service", "xiaojun-exchange-nginx.service")),
     "hysteria2": ("Hysteria2 代理", ("sing-box.service",)),
     "xui": ("代理管理面板", ("x-ui.service",)),
-    "nginx": ("Nginx 网页入口", ("nginx.service", "xiaojun-exchange-nginx.service")),
+    "nginx": ("Nginx 网页入口", ("nginx.service",)),
 }
 
 

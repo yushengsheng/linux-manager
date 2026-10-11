@@ -106,6 +106,8 @@ class BackupAndControllerTests(unittest.TestCase):
         self.vault = MemoryVault(); self.store = Store(self.root / "local", self.vault)
         self.connection = Connection(host="fixture.invalid", username="fixture", password="fictional-login", remember=False)
         self.controller = Controller(self.store); self.ssh = mock.Mock()
+        patch = mock.patch("linux_manager.controller.secrets.token_hex", return_value="a" * 24)
+        patch.start(); self.addCleanup(patch.stop)
         self.ssh.redactor.text.side_effect = lambda value: value
         self.controller.transport = mock.Mock(return_value=self.ssh)
 

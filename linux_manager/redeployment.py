@@ -165,14 +165,14 @@ def deployment_preflight(params):
         elif kind == "exchange" and _bootstrap_reset_allowed():
             action = "retry"
         elif kind == "exchange":
-            require(Path("/opt/xiaojun-exchange/current/version.txt").is_file(), "安装布局无法识别，已保留交易数据；请先恢复官方安装布局，不能清空覆盖。")
+            require(Path("/opt/xiaojun-exchange/current/version.txt").is_file() or data.get("uninstalled") and data.get("uninstall_task") and data.get("version") and Path("/etc/xiaojun-exchange/server.env").is_file() and Path("/var/lib/xiaojun-exchange").is_dir(), "安装布局无法识别，已保留交易数据；请先恢复官方安装布局，不能清空覆盖。")
             action = "repair"
         elif kind in {"hysteria2", "xui"}:
             action = "repair"
         else:
             action = "install"
     return {"service": kind, "architecture": architecture, "preflight": "passed", "action": action,
-            "installed": present, "version": requested, "port": number, "host": address,
+            "installed": present, "reinstall": bool(data.get("uninstalled")), "version": requested, "port": number, "host": address,
             "changes": changes, "fingerprint": _state_fingerprint(data),
             "requires_archive": kind != "nginx" and action in {"install", "update", "repair", "retry"},
             "backend_port": port(params.get("backend_port", data.get("backend_port", 18880))) if kind == "exchange" else None}
@@ -244,8 +244,14 @@ def restore_deployment(identifier):
     cert_hook()
     for unit, state in extra["unit_states"].items():
         if state.get("LoadState") == "loaded":
-            command(["systemctl", "enable" if state.get("UnitFileState") == "enabled" else "disable", unit], check=False)
+            startup = state.get("UnitFileState")
+            if startup in {"enabled", "disabled"}:
+                command(["systemctl", "enable" if startup == "enabled" else "disable", unit])
             command(["systemctl", "restart" if state.get("ActiveState") == "active" else "stop", unit], timeout=360)
+            restored = unit_info(unit)
+            require(restored.get("LoadState") == "loaded" and (restored.get("ActiveState") == "active" if state.get("ActiveState") == "active" else restored.get("ActiveState") in {"inactive", "failed"}), "原项目服务状态恢复未通过，请查看任务记录。")
+            if startup:
+                require(restored.get("UnitFileState") == startup, "原项目开机启动状态恢复未通过，请查看任务记录。")
 
 
 def _exchange_installer(source):
@@ -316,7 +322,7 @@ def _change_exchange(params, plan):
     tls = Path("/etc/xiaojun-exchange/tls"); tls.mkdir(mode=0o700, exist_ok=True)
     private_write(tls / "fullchain.pem", Path(cert).read_bytes()); private_write(tls / "privkey.pem", Path(key).read_bytes())
     configuration = Path("/etc/xiaojun-exchange/nginx.conf")
-    if configuration.is_file() and plan["action"] != "repair":
+    if configuration.is_file() and (plan["action"] != "repair" or plan.get("reinstall")):
         text = configuration.read_text()
         old_port = str(previous.get("port", number))
         old_backend = str(previous.get("backend_port", backend))
@@ -333,6 +339,8 @@ def _change_exchange(params, plan):
     Path("/run/xiaojun-exchange-nginx").mkdir(mode=0o755, parents=True, exist_ok=True)
     command(["nginx", "-t", "-c", "/etc/xiaojun-exchange/nginx.conf"])
     command(["systemctl", "daemon-reload"])
+    if plan.get("reinstall"):
+        command(["systemctl", "enable", *UNITS["exchange"], "xiaojun-exchange-maintenance.timer", "xiaojun-exchange-logrotate.timer"])
     if version_change:
         command(["systemctl", "start", *UNITS["exchange"]], timeout=360)
         for timer in ["xiaojun-exchange-maintenance.timer", "xiaojun-exchange-logrotate.timer"]:
@@ -373,7 +381,9 @@ def _change_hysteria(params, plan):
     command(["/usr/local/bin/sing-box", "check", "-c", str(config_path)])
     if not Path("/etc/systemd/system/sing-box.service").is_file():
         private_write("/etc/systemd/system/sing-box.service", "[Unit]\nDescription=sing-box\nAfter=network-online.target\n[Service]\nExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json\nRestart=on-failure\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\n", 0o644)
-    command(["systemctl", "daemon-reload"]); command(["systemctl", "restart", "sing-box.service"])
+    command(["systemctl", "daemon-reload"])
+    if plan.get("reinstall"): command(["systemctl", "enable", "sing-box.service"])
+    command(["systemctl", "restart", "sing-box.service"])
     time.sleep(2)
     require(unit_info("sing-box.service").get("ActiveState") == "active" and any(item["port"] == plan["port"] and item["protocol"] == "udp" for item in listeners()), "代理新配置未能正常监听。")
     allow_port(plan["port"], "udp")
@@ -432,7 +442,9 @@ def _change_xui(params, plan):
     require(before == after.get("inbounds", []), "目标版本改变了原节点配置，已停止并恢复原项目。")
     if not Path("/etc/systemd/system/x-ui.service").is_file():
         private_write("/etc/systemd/system/x-ui.service", "[Unit]\nDescription=x-ui\nAfter=network-online.target\n[Service]\nWorkingDirectory=/usr/local/x-ui\nExecStart=/usr/local/x-ui/x-ui\nRestart=on-failure\nRestartSec=5\n[Install]\nWantedBy=multi-user.target\n", 0o644)
-    command(["systemctl", "daemon-reload"]); command(["systemctl", "start", "x-ui.service"])
+    command(["systemctl", "daemon-reload"])
+    if plan.get("reinstall"): command(["systemctl", "enable", "x-ui.service"])
+    command(["systemctl", "start", "x-ui.service"])
     time.sleep(3)
     require(unit_info("x-ui.service").get("ActiveState") == "active", "管理面板新版本启动失败。")
     verify_local_https(plan["host"], plan["port"], after.get("path", "/"), params.get("tls_cert"))

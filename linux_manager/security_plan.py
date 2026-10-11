@@ -25,7 +25,7 @@ def apply_plan(controller, original, options, progress):
     if len(phrase) < 16 or any(c in phrase for c in "\r\n\x00"):
         raise ManagerError("私钥口令至少 16 位；留空可以安全自动生成。")
     # Check compatibility and conflicts before generating keys or changing Linux.
-    controller.transport(original, fresh=True).call({"action": "security_preflight", "mode": mode, "username": target, "current_username": original.username})
+    controller.retry_call(original, {"action": "security_preflight", "mode": mode, "username": target, "current_username": original.username}, progress=progress)
     old_public = controller.public_key(original) if mode == "rename" and options.get("retire_old_key") and original.auth == "key" else ""
     updated = original.changed(remember=True)
     if mode == "create":

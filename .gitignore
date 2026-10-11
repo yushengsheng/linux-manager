@@ -14,6 +14,7 @@ build/
 *.spec
 *.app/
 *.zip
+/新版v*/
 .DS_Store
 .repository-sync/
 profiles.json

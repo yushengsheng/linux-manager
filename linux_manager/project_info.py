@@ -6,6 +6,66 @@ import urllib.parse
 
 from .vault import vault_alias
 
+SERVICE_PROTOCOLS = {"exchange": "TCP", "hysteria2": "UDP", "xui": "TCP", "nginx": "TCP"}
+
+
+def deployment_network_hint(service, number, backend=None):
+    protocol = SERVICE_PROTOCOLS[service]
+    other = "TCP" if protocol == "UDP" else "UDP"
+    purpose = "面板网页" if service == "xui" else "HY2 节点" if service == "hysteria2" else "网页"
+    lines = [f"{purpose}入口：放行 {protocol} {number or '所填端口'}，此入口不需要开放 {other}。"]
+    if service == "exchange":
+        lines.append(f"内部服务：TCP {backend or '内部端口'}，仅服务器本机使用，不向公网开放。")
+    if service == "xui":
+        lines.append("代理节点和订阅端口独立于面板；节点按配置使用 TCP、UDP 或两者，请在「运行与备份」查看各节点协议。")
+    if service != "nginx":
+        lines.append("证书申请 / 续期的 HTTP 验证另需 TCP 80，与业务端口的协议无关。")
+    lines.append("服务器防火墙与云平台安全组都需按对应协议放行；云平台规则需自行设置。")
+    return "\n".join(lines)
+
+
+def inbound_port_protocol(inbound):
+    """Describe the public listener, not the traffic carried inside a proxy."""
+    protocol = str(inbound.get("protocol") or "").lower()
+    settings = inbound.get("settings", {})
+    stream = inbound.get("stream_settings", {})
+    unknown = "协议未识别，请核对节点配置"
+    if protocol in {"hysteria", "hysteria2", "hy2", "wireguard"}:
+        return "UDP"
+    if protocol == "mtproto":
+        return "TCP"
+    if inbound.get("port_protocol_error") or not isinstance(settings, dict) or not isinstance(stream, dict):
+        return unknown
+    network = str(stream.get("network") or "tcp").lower()
+    if protocol in {"shadowsocks", "dokodemo-door", "tunnel"}:
+        field = "allowedNetwork" if protocol == "tunnel" else "network"
+        networks = settings.get(field)
+        if networks not in (None, ""):
+            if not isinstance(networks, str):
+                return unknown
+            parts = {part.strip().lower() for part in networks.split(",")}
+            if not parts or not parts <= {"tcp", "udp"}:
+                return unknown
+            return " + ".join(part.upper() for part in ("tcp", "udp") if part in parts)
+    if protocol in {"socks", "mixed"} and settings.get("udp") is True:
+        return "TCP + UDP"
+    if network in {"kcp", "mkcp", "quic", "hysteria", "hysteria2"}:
+        return "UDP"
+    if network in {"xhttp", "splithttp"} and stream.get("security") == "tls":
+        tls = stream.get("tlsSettings") or {}
+        if not isinstance(tls, dict):
+            return unknown
+        if tls.get("alpn") == ["h3"]:
+            return "UDP"
+    if protocol in {"vless", "vmess", "trojan", "http", "socks", "mixed", "shadowsocks", "dokodemo-door", "tunnel"} and network in {"tcp", "raw", "ws", "websocket", "grpc", "http", "h2", "httpupgrade", "splithttp", "xhttp"}:
+        return "TCP"
+    return unknown
+
+
+def frontend_port_protocol(data, number):
+    protocols = {row.get("protocol") for row in data.get("frontend_listeners", []) if row.get("port") == number}
+    return " + ".join(value.upper() for value in ("tcp", "udp") if value in protocols) or "TCP"
+
 
 def server_key(connection):
     return hashlib.sha256((connection.host.lower()+':'+str(connection.port)).encode()).hexdigest()[:16]
@@ -72,12 +132,15 @@ def node_links(data, fallback_host):
 
 def information_rows(data, connection, credentials=None):
     credentials=credentials or {};kind=data.get('service','');host=data.get('host') or connection.host
-    rows=[('项目状态','已安装' if data.get('installed') else '尚未安装'),('服务器',connection.label+' · '+connection.host)]
+    rows=[('项目状态','已卸载（数据保留）' if data.get('uninstalled') else '已安装' if data.get('installed') else '尚未安装'),('服务器',connection.label+' · '+connection.host)]
     if not data.get('installed'):return rows
     if data.get('version'):rows.append(('安装版本',data['version']))
-    if data.get('port'):rows.append(('服务端口',str(data['port'])))
-    if data.get('backend_port'):rows.append(('内部端口',str(data['backend_port'])+'（仅服务器本机）'))
-    if data.get('frontend_ports'):rows.append(('网页入口端口','、'.join(map(str,data['frontend_ports']))))
+    protocol = frontend_port_protocol(data, data.get('port')) if kind == 'nginx' else SERVICE_PROTOCOLS.get(kind, '协议未识别')
+    if data.get('port'):
+        rows.append(('服务端口',str(data['port'])+' / '+protocol))
+        rows.append(('端口协议',protocol+'（两者都需放行）' if protocol == 'TCP + UDP' else protocol+'（此入口仅需 '+protocol+'）'))
+    if data.get('backend_port'):rows.append(('内部端口',str(data['backend_port'])+' / TCP（仅服务器本机，无需公网放行）'))
+    if data.get('frontend_ports'):rows.append(('网页入口端口','、'.join(str(number)+' / '+frontend_port_protocol(data,number) for number in data['frontend_ports'])))
     if kind in {'exchange','xui','nginx'} and data.get('port'):
         url=(data.get('scheme') or ('http' if kind=='nginx' else 'https'))+'://'+authority(host,data['port'])+(data.get('path') or '/')
         rows.append(('后台网址' if kind=='xui' else '软件网址',url))
@@ -87,9 +150,15 @@ def information_rows(data, connection, credentials=None):
     if kind=='xui':
         rows.extend([('后台账号',data.get('panel_username') or credentials.get('panel_username') or '未能读取'),('后台密码',credentials.get('panel_password') or '未在本机保存；可点击「补充登录信息」填写')])
     if kind=='hysteria2' and data.get('proxy_password'):rows.append(('服务密码',data['proxy_password']))
+    if kind=='xui' and data.get('subscription_port'):
+        scope = '仅服务器本机，无需公网放行' if data.get('subscription_local_only') else '订阅入口，需单独放行'
+        rows.append(('订阅服务端口',str(data['subscription_port'])+' / TCP（'+scope+'）'))
     rows.extend(node_links(data,host))
     for inbound in data.get('inbounds',[]):
-        rows.append(('节点端口：'+(inbound.get('remark') or inbound.get('protocol','代理')),str(inbound.get('port','未知'))+' · '+inbound.get('protocol','未知')+' · '+('已开启' if inbound.get('enable',True) else '已停用')))
+        protocol = inbound_port_protocol(inbound)
+        enabled = inbound.get('enable',True)
+        rule = ('TCP、UDP 两者都需放行' if protocol == 'TCP + UDP' else '仅需放行 '+protocol) if protocol in {'TCP','UDP','TCP + UDP'} else protocol
+        rows.append(('节点端口：'+(inbound.get('remark') or inbound.get('protocol','代理')),str(inbound.get('port','未知'))+' / '+protocol+' · '+inbound.get('protocol','未知')+' · '+('已开启；'+rule if enabled else '已停用；无需为此节点新增放行')))
     if kind=='xui' and not data.get('inbounds'):rows.append(('代理节点','尚未创建节点；先登录后台添加节点'))
     for unit in data.get('units',[]):
         state='运行中' if unit.get('ActiveState')=='active' else '已停止'

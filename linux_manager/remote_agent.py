@@ -8,6 +8,7 @@ import fcntl
 import fnmatch
 import grp
 import hashlib
+import hmac
 import http.client
 import io
 import json
@@ -36,11 +37,17 @@ UNITS = {
     "exchange": ["xiaojun-exchange-web.service", "xiaojun-exchange-worker.service", "xiaojun-exchange-nginx.service"],
     "hysteria2": ["sing-box.service"],
     "xui": ["x-ui.service"],
-    "nginx": ["nginx.service", "xiaojun-exchange-nginx.service"],
+    "nginx": ["nginx.service"],
 }
-JOB_ACTIONS = {"deploy", "create_admin", "rename_user", "password", "ssh", "firewall", "updates", "backup", "restore", "service", "account_access", "delete_user", "ssh_hardening", "fail2ban", "prepare_key", "login_policy", "retire_key"}
+JOB_ACTIONS = {"deploy", "uninstall", "create_admin", "rename_user", "password", "ssh", "firewall", "updates", "backup", "restore", "service", "account_access", "delete_user", "ssh_hardening", "fail2ban", "prepare_key", "login_policy", "retire_key"}
 TASK = None
 SECRETS = set()
+APT_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
+UPDATE_CONFIG = "/etc/apt/apt.conf.d/90-linux-manager-updates"
+
+
+def update_configuration_paths():
+    return [UPDATE_CONFIG, *(f"/etc/systemd/system/{unit}.d/90-linux-manager-updates.conf" for unit in APT_TIMERS)]
 #LM_BUNDLED_CERTBOT#
 
 
@@ -148,7 +155,7 @@ def host(value):
 
 def unit_info(unit):
     data = {}
-    result = command(["systemctl", "show", unit, "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,Description"], check=False)
+    result = command(["systemctl", "show", unit, "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,Description,FragmentPath,DropInPaths"], check=False)
     for line in result.stdout.splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
@@ -235,6 +242,52 @@ def firewall_snapshot():
     return {"installed": True, "active": "Status: active" in result.stdout, "rules": clean(result.stdout)}
 
 
+def update_timer_states():
+    timers = {}
+    for unit in APT_TIMERS:
+        result = command(["systemctl", "show", unit, "--property=LoadState,ActiveState,SubState,UnitFileState,NextElapseUSecRealtime,Persistent"], check=False)
+        timers[unit] = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line) if result.returncode == 0 else {}
+    return timers
+
+
+def automatic_updates_snapshot():
+    installed = bool(shutil.which("unattended-upgrade"))
+    result = command(["apt-config", "dump"], check=False) if shutil.which("apt-config") else None
+    valid = result is not None and result.returncode == 0
+    values = dict(re.findall(r'^\s*(APT::Periodic::(?:Enable|Update-Package-Lists|Unattended-Upgrade)|Unattended-Upgrade::Automatic-Reboot)\s+"([^"\n]*)";', result.stdout, re.M)) if valid else {}
+    origins = bool(valid and re.search(r'^\s*Unattended-Upgrade::(?:Allowed-Origins|Origins-Pattern)::\s+"[^"\n]+";', result.stdout, re.M))
+    periodic = values.get("APT::Periodic::Enable", "1").lower() not in {"0", "false", "no"}
+    lists = values.get("APT::Periodic::Update-Package-Lists", "0")
+    upgrades = values.get("APT::Periodic::Unattended-Upgrade", "0")
+    def interval_enabled(value):
+        return value == "always" or (value.isdigit() and int(value) > 0)
+    timers = update_timer_states()
+    def scheduled(unit, state):
+        if state.get("LoadState") != "loaded" or state.get("UnitFileState") != "enabled" or state.get("ActiveState") != "active":
+            return False
+        next_run = state.get("NextElapseUSecRealtime", "")
+        if state.get("SubState") == "waiting" and next_run not in {"", "n/a", "0", "infinity"}:
+            return True
+        # A timer can temporarily have no next deadline while its job is executing.
+        return state.get("SubState") == "running" and unit_info(unit.replace(".timer", ".service")).get("ActiveState") in {"active", "activating"}
+    active = installed and valid and periodic and origins and interval_enabled(lists) and interval_enabled(upgrades) and all(scheduled(unit, state) for unit, state in timers.items())
+    return {"active": active, "installed": installed, "config_valid": valid, "periodic_enabled": periodic if valid else False, "package_lists_interval": lists, "upgrade_interval": upgrades, "origins_configured": origins, "automatic_reboot": values.get("Unattended-Upgrade::Automatic-Reboot", "false").lower() not in {"false", "no", "0"} if valid else None, "timers": timers}
+
+
+def restore_update_timers(timers):
+    command(["systemctl", "daemon-reload"])
+    current = update_timer_states()
+    for unit in APT_TIMERS:
+        previous = timers[unit]
+        if current[unit].get("UnitFileState") != previous.get("UnitFileState"):
+            require(previous.get("UnitFileState") in {"enabled", "disabled"}, "原更新定时器使用自定义启动方式，不能自动恢复；请查看任务记录。")
+            command(["systemctl", "enable" if previous["UnitFileState"] == "enabled" else "disable", unit])
+        if (current[unit].get("ActiveState") == "active") != (previous.get("ActiveState") == "active"):
+            command(["systemctl", "start" if previous.get("ActiveState") == "active" else "stop", unit])
+    current = update_timer_states()
+    require(all(current[unit].get("UnitFileState") == timers[unit].get("UnitFileState") and (current[unit].get("ActiveState") == "active") == (timers[unit].get("ActiveState") == "active") for unit in APT_TIMERS), "更新定时器原状态恢复未通过，请查看任务记录。")
+
+
 def snapshot(include_projects=False, address=""):
     release = platform.freedesktop_os_release()
     disk = shutil.disk_usage("/")
@@ -247,7 +300,8 @@ def snapshot(include_projects=False, address=""):
     supported = (release.get("ID"), release.get("VERSION_ID")) in {("ubuntu", "24.04"), ("debian", "12"), ("debian", "13")}
     protection = unit_info("fail2ban.service")
     jail = command(["fail2ban-client", "status", "linux-manager-sshd"], check=False) if shutil.which("fail2ban-client") else None
-    result = {"os": release.get("PRETTY_NAME", "Linux"), "architecture": platform.machine(), "supported": supported, "disk_total": disk.total, "disk_free": disk.free, "memory": memory, "load": list(os.getloadavg()), "accounts": account_snapshot(), "ssh": ssh_configuration(), "firewall": firewall_snapshot(), "services": services, "listeners": listeners(), "automatic_updates": unit_info("unattended-upgrades.service").get("ActiveState") == "active", "fail2ban": {"installed": protection.get("LoadState") == "loaded", "active": bool(jail and jail.returncode == 0)}, "tasks": task_list()}
+    updates = automatic_updates_snapshot()
+    result = {"os": release.get("PRETTY_NAME", "Linux"), "architecture": platform.machine(), "supported": supported, "disk_total": disk.total, "disk_free": disk.free, "memory": memory, "load": list(os.getloadavg()), "accounts": account_snapshot(), "ssh": ssh_configuration(), "firewall": firewall_snapshot(), "services": services, "listeners": listeners(), "automatic_updates": updates["active"], "update_status": updates, "fail2ban": {"installed": protection.get("LoadState") == "loaded", "active": bool(jail and jail.returncode == 0)}, "tasks": task_list()}
     if include_projects:
         result["project_details"] = {}
         for kind in UNITS:
@@ -279,19 +333,38 @@ def state_lock(folder):
         yield
 
 
-def start_task(params):
+def start_task(params, identifier=None):
     action = params.get("operation")
     require(action in JOB_ACTIONS, "不支持此操作。")
+    if identifier is not None:
+        validate_task_id(identifier)
     with state_lock(ROOT / "submission"):
-        return submit_task(params)
+        return submit_task(params, identifier)
 
 
-def submit_task(params):
+def submission_digest(params, key):
+    # A keyed receipt survives deletion of the secret request without exposing
+    # an unkeyed password hash in the public task status.
+    encoded = json.dumps(params, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    return hmac.new(bytes.fromhex(key), encoded, hashlib.sha256).hexdigest()
+
+
+def submit_task(params, identifier=None):
     action = params["operation"]
     root = ROOT / "tasks"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    identifier = identifier or secrets.token_hex(12)
+    directory = root / identifier
+    if directory.exists():
+        receipt = directory / "submission.json"
+        require(receipt.is_file() and (directory / "status.json").is_file(), "任务提交记录不完整，请检查操作记录；不会重复执行。")
+        saved = json.loads(receipt.read_text())
+        require(hmac.compare_digest(saved["digest"], submission_digest(params, saved["key"])), "任务编号已经用于其他请求，未执行重复提交。")
+        return {"task_id": identifier}
     # Changes waiting for independent SSH verification must finish first.
     require(not any(s["state"] in {"queued", "running", "awaiting_verification", "recovery_failed"} for s in task_list()), "另一个任务尚未完成，请先查看操作记录并完成验证或恢复。")
+    key = secrets.token_hex(32)
+    receipt = {"key": key, "digest": submission_digest(params, key)}
     params = dict(params)
     archive = params.pop("release_archive", None)
     content = None
@@ -303,9 +376,8 @@ def submit_task(params):
         except (ValueError, TypeError):
             raise OperationError("发行包传送格式无效。") from None
         require(0 < len(content) <= 100 * 1024 * 1024 and hashlib.sha256(content).hexdigest() == params.get("release_sha256"), "发行包传送校验失败，未提交安装。")
-    identifier = secrets.token_hex(12)
-    directory = root / identifier
     directory.mkdir(mode=0o700)
+    write_json(directory / "submission.json", receipt)
     if content is not None:
         private_write(directory / "release.tar.gz", content)
     write_json(directory / "request.json", params)
@@ -418,6 +490,11 @@ def restore_files(task):
     if extra.get("service") == "security":
         # General configuration restore must not undo individual account actions.
         write_account_denials(managed_accounts())
+    if "update_timers" in extra:
+        restore_update_timers(extra["update_timers"])
+    if extra.get("operation") == "updates":
+        # Update rollback must not reload SSH or alter firewall/account settings.
+        return
     command(["systemctl", "daemon-reload"], check=False)
     if extra.get("deployment"):
         return
@@ -482,8 +559,15 @@ def recover(identifier):
             if status["state"] not in {"awaiting_verification", "running", "recovery_failed"}:
                 return
             try:
-                restore_files(identifier)
-                status.update(state="rolled_back", progress=100, updated=now(), message="新连接未在时限内验证，已恢复原配置。")
+                operation = status.get("operation")
+                if operation == "uninstall":
+                    restore_uninstall(identifier)
+                elif operation == "deploy":
+                    restore_deployment(identifier)
+                else:
+                    restore_files(identifier)
+                message = "卸载未完成，已恢复项目文件和原服务状态。" if operation == "uninstall" else "部署未完成，已恢复原项目和服务状态。" if operation == "deploy" else "新连接未在时限内验证，已恢复原配置。"
+                status.update(state="rolled_back", progress=100, updated=now(), message=message)
             except Exception as error:
                 status.update(state="recovery_failed", progress=100, updated=now(), message="配置恢复未完成，请通过云平台控制台检查；修复后可再次恢复。", diagnostic=clean(str(error)))
             write_json(folder / "status.json", status)
@@ -491,12 +575,13 @@ def recover(identifier):
 
 def confirm_task(identifier):
     identifier = validate_task_id(identifier)
-    require(status_task(identifier)["state"] == "awaiting_verification", "此任务没有等待连接验证。")
+    require(status_task(identifier)["state"] in {"awaiting_verification", "succeeded"}, "此任务没有等待连接验证。")
     with state_lock(ROOT / "tasks" / identifier):
         status = status_task(identifier)
-        require(status["state"] == "awaiting_verification", "此任务已经恢复，请重新检查连接。")
-        status.update(state="succeeded", progress=100, message="新连接及管理员权限验证成功，配置已生效。", updated=now())
-        write_json(ROOT / "tasks" / identifier / "status.json", status)
+        require(status["state"] in {"awaiting_verification", "succeeded"}, "此任务已经恢复，请重新检查连接。")
+        if status["state"] == "awaiting_verification":
+            status.update(state="succeeded", progress=100, message="新连接及管理员权限验证成功，配置已生效。", updated=now())
+            write_json(ROOT / "tasks" / identifier / "status.json", status)
     # Persist confirmation before stopping the timer, so an already-started
     # watchdog sees the committed state and cannot undo a verified change.
     command(["systemctl", "stop", "linux-manager-recover-" + identifier + ".timer"], check=False)
@@ -982,12 +1067,31 @@ def firewall_settings(params):
 
 
 def update_settings(params):
-    apt(["unattended-upgrades"])
-    target = Path("/etc/apt/apt.conf.d/90-linux-manager-updates")
-    backup_files([str(target)])
-    enabled = "1" if params.get("enabled", True) else "0"
-    private_write(target, 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "' + enabled + '";\nUnattended-Upgrade::Automatic-Reboot "false";\n', 0o644)
-    return {"enabled": enabled == "1", "automatic_reboot": False}
+    enabled = params.get("enabled", True)
+    require(isinstance(enabled, bool), "请选择开启或关闭自动安全更新。")
+    previous = update_timer_states()
+    require(all(state.get("LoadState") == "loaded" and state.get("UnitFileState") in {"enabled", "disabled"} for state in previous.values()), "APT 定时器缺失、被屏蔽或使用自定义启动方式，未改动更新配置；请先检查系统。")
+    backup_files(update_configuration_paths(), {"operation": "updates", "update_timers": previous})
+    if enabled and not shutil.which("unattended-upgrade"):
+        apt(["unattended-upgrades"])
+    private_write(UPDATE_CONFIG, 'APT::Periodic::Enable "1";\nAPT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "' + ("1" if enabled else "0") + '";\nUnattended-Upgrade::Automatic-Reboot "false";\n', 0o644)
+    configured = automatic_updates_snapshot()
+    require(configured["config_valid"] and configured["automatic_reboot"] is False and configured["periodic_enabled"] and configured["package_lists_interval"] == "1" and configured["upgrade_interval"] == ("1" if enabled else "0"), "自动更新配置被其他设置覆盖或无效，已停止并尝试恢复原设置。")
+    if enabled:
+        require(configured["installed"] and configured["origins_configured"], "缺少可用的安全更新工具或软件源策略，已停止并尝试恢复原设置。")
+        for path in update_configuration_paths()[1:]:
+            # Keep the distribution's calendar/random delay, but do not immediately
+            # catch up missed upgrades when enabling a previously disabled timer.
+            private_write(path, "[Timer]\nPersistent=false\n", 0o644)
+        step("启用 APT 定时调度并核验下一次执行时间…", 80)
+        command(["systemctl", "daemon-reload"])
+        require(all(state.get("Persistent") == "no" for state in update_timer_states().values()), "更新定时器配置被其他设置覆盖，无法避免立即补跑；已停止并尝试恢复原设置。")
+        command(["systemctl", "enable", "--now", *APT_TIMERS])
+        command(["systemctl", "restart", *APT_TIMERS])
+        configured = automatic_updates_snapshot()
+        require(configured["active"] and configured["automatic_reboot"] is False, "自动更新定时调度未通过验证，已停止并尝试恢复原设置。")
+    # Disabling upgrades leaves the shared package-list refresh timers alone.
+    return {"enabled": enabled, "automatic_reboot": False, "update_status": configured}
 
 
 def github_release(repo, version):
@@ -1064,12 +1168,12 @@ def cert_hook():
     managed = ROOT / "installed.json"
     script = "#!/bin/sh\n"
     installed = json.loads(managed.read_text()) if managed.exists() else {}
-    if installed.get("exchange", {}).get("certificate_source") == "manager":
+    if installed.get("exchange", {}).get("certificate_source") == "manager" and not installed["exchange"].get("uninstalled"):
         lineage = installed["exchange"].get("certificate_lineage", "/etc/linux-server-manager/letsencrypt/live/manager")
         script += 'if [ "$RENEWED_LINEAGE" = ' + shlex.quote(lineage) + ' ]; then\n'
         script += '  install -m 600 "$RENEWED_LINEAGE/fullchain.pem" /etc/xiaojun-exchange/tls/fullchain.pem && install -m 600 "$RENEWED_LINEAGE/privkey.pem" /etc/xiaojun-exchange/tls/privkey.pem && systemctl reload xiaojun-exchange-nginx.service\nfi\n'
     for service in ["hysteria2", "xui"]:
-        if service in installed:
+        if service in installed and not installed[service].get("uninstalled"):
             lineage = proxy_certificate_lineage(service)
             if lineage:
                 script += 'if [ "$RENEWED_LINEAGE" = ' + shlex.quote(lineage) + ' ]; then\n'
@@ -1384,7 +1488,7 @@ def manage_service(params):
 def configuration_backup(params):
     kind = params.get("service")
     paths = {
-        "security": ["/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d", "/etc/ufw", "/etc/sudoers.d", "/etc/systemd/system/ssh.socket.d", "/etc/fail2ban/jail.d/99-linux-manager.local", "/etc/apt/apt.conf.d/90-linux-manager-updates"],
+        "security": ["/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d", "/etc/ufw", "/etc/sudoers.d", "/etc/systemd/system/ssh.socket.d", "/etc/fail2ban/jail.d/99-linux-manager.local", *update_configuration_paths()],
         "hysteria2": ["/etc/sing-box", "/etc/systemd/system/sing-box.service"],
         "xui": ["/etc/x-ui", "/etc/systemd/system/x-ui.service"],
         "nginx": ["/etc/nginx"],
@@ -1395,7 +1499,7 @@ def configuration_backup(params):
     extra = {"service": kind, "firewall_active": firewall_snapshot()["active"]}
     if kind == "security":
         protection = unit_info("fail2ban.service")
-        extra.update(fail2ban_active=protection.get("ActiveState") == "active", fail2ban_enabled=protection.get("UnitFileState") == "enabled")
+        extra.update(fail2ban_active=protection.get("ActiveState") == "active", fail2ban_enabled=protection.get("UnitFileState") == "enabled", update_timers=update_timer_states())
     directory = backup_files(paths[kind], extra)
     return {"backup_id": TASK.name, "service": kind}
 
@@ -1414,6 +1518,8 @@ def configuration_restore(params):
     if kind == "security":
         protection = unit_info("fail2ban.service")
         extra.update(fail2ban_active=protection.get("ActiveState") == "active", fail2ban_enabled=protection.get("UnitFileState") == "enabled")
+        if "update_timers" in manifest["extra"]:
+            extra["update_timers"] = update_timer_states()
     backup_files(current_paths, extra)
     arm_recovery()
     restore_files(identifier)
@@ -1436,7 +1542,7 @@ def run_task(identifier):
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             status.update(state="running", message="开始执行。", updated=now())
             write_json(TASK / "status.json", status)
-            handlers = {"deploy": deploy, "create_admin": create_admin, "rename_user": rename_user, "password": system_password, "ssh": ssh_settings, "firewall": firewall_settings, "updates": update_settings, "backup": configuration_backup, "restore": configuration_restore, "service": manage_service, "account_access": account_access, "delete_user": delete_user, "ssh_hardening": ssh_hardening, "fail2ban": fail2ban_settings, "prepare_key": prepare_key, "login_policy": login_policy, "retire_key": retire_key}
+            handlers = {"deploy": deploy, "uninstall": uninstall_project, "create_admin": create_admin, "rename_user": rename_user, "password": system_password, "ssh": ssh_settings, "firewall": firewall_settings, "updates": update_settings, "backup": configuration_backup, "restore": configuration_restore, "service": manage_service, "account_access": account_access, "delete_user": delete_user, "ssh_hardening": ssh_hardening, "fail2ban": fail2ban_settings, "prepare_key": prepare_key, "login_policy": login_policy, "retire_key": retire_key}
             data = handlers[params["operation"]](params)
             state = "awaiting_verification" if data.get("requires_verification") else "succeeded"
             status = json.loads((TASK / "status.json").read_text())
@@ -1445,7 +1551,13 @@ def run_task(identifier):
         except Exception as error:
             recovery_failed = False
             recovery_diagnostic = ""
-            if (TASK / "backup/manifest.json").exists() and params["operation"] in {"deploy", "ssh", "rename_user", "password", "firewall", "restore", "create_admin", "account_access", "delete_user", "ssh_hardening", "fail2ban", "prepare_key", "login_policy", "retire_key"}:
+            if params["operation"] == "uninstall" and (TASK / "uninstall/manifest.json").exists():
+                try:
+                    restore_uninstall(identifier)
+                except Exception as recovery_error:
+                    recovery_failed = True
+                    recovery_diagnostic = clean(type(recovery_error).__name__ + ": " + str(recovery_error))
+            elif (TASK / "backup/manifest.json").exists() and params["operation"] in {"deploy", "ssh", "rename_user", "password", "firewall", "restore", "create_admin", "account_access", "delete_user", "ssh_hardening", "fail2ban", "prepare_key", "login_policy", "retire_key", "updates"}:
                 try:
                     if params["operation"] == "deploy":
                         restore_deployment(identifier)
@@ -1456,7 +1568,7 @@ def run_task(identifier):
                     recovery_diagnostic = clean(type(recovery_error).__name__ + ": " + str(recovery_error))
             command(["systemctl", "stop", "linux-manager-recover-" + identifier + ".timer"], check=False)
             status = json.loads((TASK / "status.json").read_text())
-            status.update(state="recovery_failed" if recovery_failed else "failed", progress=100, updated=now(), message="操作失败且配置恢复未完成，请通过云平台控制台检查。" if recovery_failed else ("部署未完成，已恢复原项目。" if params["operation"] == "deploy" and (TASK / "backup/manifest.json").exists() else "") + (clean(error) if isinstance(error, OperationError) else "执行出现异常，已保留任务记录。请查看脱敏诊断。"))
+            status.update(state="recovery_failed" if recovery_failed else "failed", progress=100, updated=now(), message="操作失败且配置恢复未完成，请通过云平台控制台检查。" if recovery_failed else ("卸载未完成，已恢复项目文件和原服务状态。" if params["operation"] == "uninstall" and (TASK / "uninstall/manifest.json").exists() else "部署未完成，已恢复原项目。" if params["operation"] == "deploy" and (TASK / "backup/manifest.json").exists() else "") + (clean(error) if isinstance(error, OperationError) else "执行出现异常，已保留任务记录。请查看脱敏诊断。"))
             status["diagnostic"] = clean(type(error).__name__ + ": " + str(error))
             if recovery_diagnostic:
                 status["recovery_diagnostic"] = recovery_diagnostic
@@ -1495,6 +1607,11 @@ def connection_details(params):
         config = command(["systemctl","show","xiaojun-exchange-web.service","--property=ExecStart","--value"],check=False).stdout
         match = re.search(r"--port\s+(\d+)",config)
         if match:data["backend_port"]=int(match.group(1))
+        elif data.get("uninstalled"):
+            retained = Path("/etc/xiaojun-exchange/nginx.conf")
+            if retained.is_file():
+                match = re.search(r"127\.0\.0\.1:(\d+)", retained.read_text())
+                if match:data["backend_port"]=int(match.group(1))
         data.setdefault("port",26483)
         certificate_file = next((p for p in ["/etc/xiaojun-exchange/tls/fullchain.pem", "/etc/xiaojun-exchange/letsencrypt/live/exchange-ip/fullchain.pem"] if Path(p).is_file()),"")
         return certificate_expiry(data,certificate_file)
@@ -1522,9 +1639,11 @@ def connection_details(params):
                     row=dict(row);item={key:row[key] for key in ["port","protocol","remark","enable"] if key in row}
                     for key in ["settings","stream_settings"]:
                         try:item[key]=json.loads(row.get(key) or "{}")
-                        except (ValueError,TypeError):item[key]={}
+                        except (ValueError,TypeError):item[key]={};item["port_protocol_error"]=True
                     data["inbounds"].append(item)
             if settings.get("subEnable", "true").lower()=="true":
+                data["subscription_port"] = port(settings.get("subPort") or 2096)
+                data["subscription_local_only"] = settings.get("subListen", "").strip("[]") in {"127.0.0.1", "::1", "localhost"} or settings.get("subListen", "").startswith("127.")
                 custom=settings.get("subURI", "")
                 if custom.startswith(("https://","http://")):
                     data["subscription_base"]=custom
@@ -1535,7 +1654,8 @@ def connection_details(params):
                         authority="["+address+"]" if ":" in address else address
                         data["subscription_base"]=scheme+"://"+authority+":"+str(settings.get("subPort") or 2096)+(settings.get("subPath") or "/sub/")
         return certificate_expiry(data,settings.get("webCertFile"))
-    data["frontend_ports"] = sorted({row["port"] for row in listeners() if "nginx" in row.get("processes",[]) and not row["local_only"]})
+    data["frontend_listeners"] = [{"port":row["port"], "protocol":row["protocol"]} for row in listeners() if "nginx" in row.get("processes",[]) and not row["local_only"]]
+    data["frontend_ports"] = sorted({row["port"] for row in data["frontend_listeners"]})
     if 80 in data["frontend_ports"]:
         data.setdefault("port",80);data.setdefault("scheme","http")
     elif data["frontend_ports"]:
@@ -1573,12 +1693,21 @@ def dispatch(request):
     if operation == "deployment_preflight":
         register_secrets(request.get("params", {}))
         return deployment_preflight(request.get("params", {}))
+    if operation == "uninstall_preflight":
+        return uninstall_preflight(request.get("params", {}))
     if operation == "account_details":
         return account_details(request)
     if operation == "security_preflight":
         return security_preflight(request)
     if operation == "start":
-        return start_task(request.get("params", {}))
+        return start_task(request.get("params", {}), request.get("task_id"))
+    if operation == "task_lookup":
+        identifier = validate_task_id(request.get("task_id"))
+        with state_lock(ROOT / "submission"):
+            directory = ROOT / "tasks" / identifier
+            if not directory.exists():
+                return {"task": None}
+            return {"task": status_task(identifier)}
     if operation == "task":
         return status_task(request.get("task_id"))
     if operation == "tasks":
@@ -1617,6 +1746,12 @@ if globals().get("LM_REDEPLOYMENT_SOURCE"):
     exec(compile(LM_REDEPLOYMENT_SOURCE, "<linux-manager-deployment>", "exec"), globals())
 elif "__file__" in globals() and Path(__file__).with_name("redeployment.py").is_file():
     exec(compile(Path(__file__).with_name("redeployment.py").read_text(), "<linux-manager-deployment>", "exec"), globals())
+
+#LM_BUNDLED_UNINSTALLATION#
+if globals().get("LM_UNINSTALLATION_SOURCE"):
+    exec(compile(LM_UNINSTALLATION_SOURCE, "<linux-manager-uninstallation>", "exec"), globals())
+elif "__file__" in globals() and Path(__file__).with_name("uninstallation.py").is_file():
+    exec(compile(Path(__file__).with_name("uninstallation.py").read_text(), "<linux-manager-uninstallation>", "exec"), globals())
 
 if __name__ == "linux_manager_remote":
     rpc()

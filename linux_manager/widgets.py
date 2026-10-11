@@ -80,11 +80,12 @@ class ScrollPage(ttk.Frame):
         self.canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.content = ttk.Frame(self.canvas, padding=24)
+        self.content = ttk.Frame(self.canvas, padding=16)
         self.item = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self._region_job = None
         self._width = None
         self._region = None
+        self._wrap_lengths = {}
         self.content.bind("<Configure>", self._schedule_region)
         self.canvas.bind("<Configure>", self._resize)
         self.bind("<Map>", self._schedule_region)
@@ -114,7 +115,22 @@ class ScrollPage(ttk.Frame):
     def _refresh_region(self):
         self._region_job = None
         if not self.winfo_ismapped(): return
-        region = (0, 0, self._width or self.canvas.winfo_width(), self.content.winfo_reqheight())
+        width = self._width or self.canvas.winfo_width()
+        def wrap(parent):
+            for child in parent.winfo_children():
+                if not child.winfo_ismapped():
+                    continue
+                if isinstance(child, ttk.Label):
+                    length = child.winfo_pixels(child.cget("wraplength") or 0)
+                    if length > 0:
+                        original = self._wrap_lengths.setdefault(child, length)
+                        available = max(120, width - 16 - (child.winfo_rootx() - self.content.winfo_rootx()))
+                        desired = min(original, available)
+                        if length != desired:
+                            child.configure(wraplength=desired)
+                wrap(child)
+        wrap(self.content)
+        region = (0, 0, width, self.content.winfo_reqheight())
         if region != self._region:
             self._region = region
             self.canvas.configure(scrollregion=region)

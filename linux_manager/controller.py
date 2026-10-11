@@ -11,15 +11,17 @@ import os
 import secrets
 import threading
 
-from .models import Connection, ManagerError, Store, atomic_private
-from .transport import SSH, Askpass, ConnectionInterrupted
+from .models import Connection, ManagerError, Store, atomic_private, validate_password, validate_user
+from .transport import SSH, Askpass, ConnectionInterrupted, AuthenticationFailed
 from .releases import download_exchange
 from .official_packages import download_project
 from .project_info import credential_alias, information_rows, server_key
-from .vault import vault_alias
+from .vault import LocalVault, vault_alias
 
 
 class Controller:
+    CONNECTION_ATTEMPTS = 4
+
     def __init__(self, store: Store):
         self.store = store
         self.connections = None
@@ -70,9 +72,23 @@ class Controller:
                 self.store.record(previous | {"state":task["state"], "message":redactor.text(task.get("message", ""))})
 
     def tasks(self, connection):
-        data = self.transport(connection).call({"action":"tasks"})
+        data = self.retry_call(connection, {"action": "tasks"})
         self.observe_tasks(connection, data["tasks"])
+        seen = {task["id"] for task in data["tasks"]}
+        latest = {row["task_id"]: row for row in self.store.history() if row.get("server_id") == connection.identifier}
+        for identifier, row in latest.items():
+            if identifier not in seen and row.get("state") == "submission_unknown":
+                data["tasks"].append({"id": identifier, "operation": row["operation"], "state": "submission_unknown", "message": "本机已保存提交编号；服务器列表尚未显示此任务，请核对后再操作，不要重跑整个方案。", "events": []})
         return data
+
+    def saved_password_tasks(self, connection):
+        latest = {row["task_id"]: row for row in self.store.history() if row.get("operation") in {"create_admin", "password"} and isinstance(row.get("task_id"), str)}
+        tasks = []
+        for identifier, row in reversed(list(latest.items())):
+            saved = self.store.vault.get(vault_alias("task-password", identifier))
+            if saved.get("host") == connection.host and saved.get("password"):
+                tasks.append({"id": identifier, "operation": row["operation"], "state": row["state"], "message": row.get("message", "本机口令副本；请核对任务结果。")})
+        return {"tasks": tasks}
 
     def _project_information(self, connection, service, data):
         values = self.store.vault.get(credential_alias(connection,service)) if service in {"exchange","hysteria2","xui"} else {}
@@ -99,6 +115,9 @@ class Controller:
 
     def deployment_preview(self, connection, params):
         return self.transport(connection).call({"action":"deployment_preflight", "params":params})
+
+    def uninstall_preview(self, connection, params):
+        return self.retry_call(connection, {"action": "uninstall_preflight", "params": params})
 
     def generate_key(self, connection: Connection, passphrase: str) -> tuple[str, str]:
         if len(passphrase) < 16 or any(c in passphrase for c in "\n\r\x00"):
@@ -163,24 +182,81 @@ class Controller:
             changes.update(password=params["new_password"], sudo_password=params["new_password"])
         return connection.changed(**changes)
 
-    def verify_task(self, connection: Connection, identifier: str, params: dict, status: dict) -> Connection:
-        candidate = self.candidate(connection, params, status.get("result", {}))
-        ssh = self.transport(candidate, fresh=True)
-        self.trust_same_server(self.transport(connection), ssh)
+    def retry_call(self, connection, request, *, timeout=30, progress=lambda status: None, fallback=None, connected=lambda connection: None):
+        # Only safe reads and idempotent confirmation use this helper. Task
+        # submission separately confirms the receipt before a repeat send.
+        original = connection
         last = None
-        for _ in range(8):
+        for attempt in range(self.CONNECTION_ATTEMPTS):
+            ssh = self.transport(connection, fresh=True)
+            if connection != original:
+                self.trust_same_server(self.transport(original), ssh)
             try:
-                ssh.call({"action": "ping"}, timeout=25)
-                if params["operation"] == "password":
-                    checked = ssh.call({"action": "verify_password", "username": params["username"], "password": params["new_password"]})
-                    if not checked["verified"]:
-                        raise ManagerError("新密码的服务器端验证失败，未确认变更。")
-                ssh.call({"action": "confirm", "task_id": identifier})
-                return candidate
-            except ManagerError as error:
+                data = ssh.call(request, timeout=timeout)
+                connected(connection)
+                return data
+            except AuthenticationFailed:
+                if fallback is None or connection == fallback:
+                    raise
+                connection = fallback
+            except ConnectionInterrupted as error:
                 last = error
+            if attempt + 1 < self.CONNECTION_ATTEMPTS:
+                progress({"task_id": request.get("task_id"), "state": "running", "progress": 0, "message": "连接暂时中断，正在重新连接并读取原任务；不会重复执行。"})
                 time.sleep(2)
-        raise ManagerError("新连接尚未验证成功。请勿重复提交；服务器将在保护时限内恢复原配置。" + (" " + str(last) if last else ""))
+        raise ConnectionInterrupted("多次重连仍未取得有效结果。请重新连接后查看操作记录，不要重跑整个方案。" + (" " + str(last) if last else ""))
+
+    def _task_fallback(self, connection, params):
+        if params["operation"] not in {"ssh", "rename_user", "password", "login_policy", "retire_key", "prepare_key", "create_admin"}:
+            return None
+        preliminary = {"verification": {"username": params.get("new_username", params.get("username", connection.username)), "port": params.get("port", connection.port)}}
+        candidate = self.candidate(connection, params, preliminary)
+        return candidate if candidate != connection else None
+
+    def _submit_task(self, connection, wire, identifier, params, progress, timeout):
+        request = {"action": "start", "task_id": identifier, "params": wire}
+        for attempt in range(self.CONNECTION_ATTEMPTS):
+            try:
+                started = self.transport(connection, fresh=True).call(request, timeout=timeout)
+                if started.get("task_id") != identifier:
+                    raise ManagerError("服务器返回的任务编号不一致，已停止；请查看操作记录，不要重复提交。")
+                return connection
+            except ConnectionInterrupted:
+                progress({"task_id": identifier, "state": "running", "progress": 0, "message": "提交响应中断，正在确认原任务是否已收到；不会重跑已执行步骤。"})
+                observed = []
+                found = self.retry_call(connection, {"action": "task_lookup", "task_id": identifier}, progress=progress, fallback=self._task_fallback(connection, params), connected=observed.append)
+                if found.get("task") is not None:
+                    task = found["task"]
+                    if not isinstance(task, dict) or task.get("id") != identifier or task.get("operation") != params["operation"]:
+                        raise ManagerError("服务器任务回执不一致，已停止；请查看操作记录。")
+                    return observed[-1]
+                if attempt + 1 < self.CONNECTION_ATTEMPTS:
+                    time.sleep(2)
+        raise ConnectionInterrupted("提交未能确认，任务编号已保存在操作记录中；请重新连接检查，不要重跑整个方案。")
+
+    def verify_task(self, connection: Connection, identifier: str, params: dict, status: dict, progress=lambda status: None) -> Connection:
+        candidate = self.candidate(connection, params, status.get("result", {}))
+        self.trust_same_server(self.transport(connection), self.transport(candidate, fresh=True))
+        try:
+            self.retry_call(candidate, {"action": "ping"}, timeout=25, progress=progress)
+            if params["operation"] == "password":
+                checked = self.retry_call(candidate, {"action": "verify_password", "username": params["username"], "password": params["new_password"]}, progress=progress)
+                if not checked["verified"]:
+                    raise ManagerError("新密码的服务器端验证失败，未确认变更。")
+            try:
+                confirmed = self.retry_call(candidate, {"action": "confirm", "task_id": identifier}, progress=progress)
+            except ConnectionInterrupted:
+                # All confirmation replies may be lost even though the server
+                # committed success. Read that state instead of reporting a
+                # verified login as an unverified change.
+                confirmed = self.retry_call(candidate, {"action": "task", "task_id": identifier}, progress=progress)
+            if confirmed.get("state") != "succeeded" or confirmed.get("id") != identifier:
+                raise ManagerError("任务确认结果不一致，已停止；请查看操作记录。")
+            status.clear()
+            status.update(confirmed)
+        except ManagerError as error:
+            raise ManagerError("新连接或任务确认未完成。请勿重复提交；服务器只会恢复仍未确认的变更，已确认结果请在操作记录中核对。 " + str(error)) from None
+        return candidate
 
     def execute(self, connection: Connection, params: dict, progress=lambda status: None) -> tuple[dict, Connection]:
         original = connection
@@ -193,10 +269,21 @@ class Controller:
             # A new SSH session verifies the spare admin immediately before mutation.
             ssh.call({"action": "ping"})
             wire["verified_username"] = connection.username
+        identifier = secrets.token_hex(12)
+        created = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        poll_connection = connection
+        def submit(timeout=60):
+            nonlocal poll_connection
+            if params["operation"] in {"rename_user", "password", "ssh", "prepare_key", "login_policy", "retire_key"}:
+                # Stop only our own master before credentials change; its
+                # watcher must not reconnect with an obsolete account/key.
+                self.disconnect_connection(connection.identifier)
+            self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": "submission_unknown", "created": created, "message": "正在提交；尚未确认服务器是否收到，勿重复执行。"})
+            poll_connection = self._submit_task(connection, wire, identifier, params, progress, timeout)
         deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "xui", "nginx"}
         pending_values = None
         if deployment:
-            preflight = ssh.call({"action": "deployment_preflight", "params": wire})
+            preflight = self.retry_call(connection, {"action": "deployment_preflight", "params": wire}, progress=progress)
             if params.get("deployment_fingerprint") and params["deployment_fingerprint"] != preflight["fingerprint"]:
                 raise ManagerError("项目配置在预览后发生变化，未执行改动。请重新预览。")
             kind = params["service"]
@@ -214,39 +301,41 @@ class Controller:
                     wire["release_sha256"] = download_exchange(preflight["version"], archive) if kind == "exchange" else download_project(kind, preflight["version"], preflight["architecture"], archive)
                     wire["release_archive"] = base64.b64encode(archive.read_bytes()).decode()
                     progress({"state": "preparing", "progress": 10, "message": "通过 SSH 传送已校验的发行包…"})
-                    started = ssh.call({"action": "start", "params": wire}, timeout=180)
+                    submit(timeout=180)
                 wire.pop("release_archive", None)
             else:
-                started = ssh.call({"action": "start", "params": wire})
+                submit()
         else:
-            started = ssh.call({"action": "start", "params": wire})
-        identifier = started["task_id"]
-        created = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            if params["operation"] == "uninstall":
+                preflight = self.uninstall_preview(connection, wire)
+                if params.get("uninstall_fingerprint") != preflight["fingerprint"]:
+                    raise ManagerError("卸载范围在预览后发生变化，未执行改动。请重新预览。")
+                wire["uninstall_fingerprint"] = preflight["fingerprint"]
+                if params.get("service") == "exchange" and params.get("maintenance_confirmed") is not True:
+                    raise ManagerError("请先在交易网页停止交易并完成撤单、清理，再卸载交易系统。")
+            if params["operation"] in {"create_admin", "password"}:
+                values = {"host": connection.host, "username": validate_user(params["username"]), "password": validate_password(params["new_password"])}
+                alias = vault_alias("task-password", identifier)
+                # Keep a per-task copy even for an account without a saved
+                # login profile; never replace the verified login in advance.
+                try:
+                    self.store.vault.put(alias, values)
+                    if isinstance(self.store.vault, LocalVault):
+                        self.store.vault.cache.pop(alias, None)
+                    if self.store.vault.get(alias) != values:
+                        raise ManagerError("本机钥匙串回读验证失败。")
+                except (ManagerError, ValueError, TypeError):
+                    raise ManagerError("新密码无法安全保存并验证，已停止；服务器密码尚未修改。请允许访问本机钥匙串后重试。") from None
+            submit()
         self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": "submitted", "created": created, "message": "任务已提交。"})
         progress({"task_id": identifier, "state": "queued", "progress": 0, "message": "任务已提交。"})
         status = {}
-        poll_connection = connection
+        fallback = self._task_fallback(connection, params)
+        def observed(current):
+            nonlocal poll_connection
+            poll_connection = current
         for _ in range(1200):
-            try:
-                status = self.transport(poll_connection).call({"action": "task", "task_id": identifier}, timeout=30)
-            except ManagerError as error:
-                # A rename or SSH change can make the original endpoint disappear.
-                if params["operation"] in {"ssh", "rename_user", "password", "login_policy", "retire_key", "prepare_key"}:
-                    preliminary = {"verification": {"username": params.get("new_username", params.get("username", connection.username)), "port": params.get("port", connection.port)}}
-                    poll_connection = self.candidate(connection, params, preliminary)
-                    try:
-                        new_ssh = self.transport(poll_connection)
-                        self.trust_same_server(ssh, new_ssh)
-                        status = new_ssh.call({"action": "task", "task_id": identifier}, timeout=30)
-                    except ManagerError:
-                        time.sleep(2)
-                        continue
-                elif isinstance(error, ConnectionInterrupted) and self.connections and self.connection_status(poll_connection)["state"] in {"connecting", "connected", "reconnecting"}:
-                    progress({"task_id":identifier, "state":"running", "progress":status.get("progress", 0), "message":"网络暂时中断，等待恢复后读取已有任务结果；不会重复执行。"})
-                    time.sleep(2)
-                    continue
-                else:
-                    raise ManagerError("连接中断。后台任务继续运行；重新连接后在操作记录中查看任务结果。") from None
+            status = self.retry_call(poll_connection, {"action": "task", "task_id": identifier}, progress=progress, fallback=fallback if fallback != poll_connection else None, connected=observed)
             progress(status)
             if status["state"] in {"succeeded", "failed", "rolled_back", "awaiting_verification", "recovery_failed"}:
                 break
@@ -255,8 +344,15 @@ class Controller:
             raise ManagerError("任务仍未结束，请在操作记录中查看后台任务，勿重复执行。")
         if status["state"] == "awaiting_verification":
             progress(status | {"message": "正在使用新连接验证账号和管理员权限…"})
-            connection = self.verify_task(connection, identifier, params, status)
-            status = self.transport(connection).call({"action": "task", "task_id": identifier})
+            connection = self.verify_task(connection, identifier, params, status, progress)
+            # Confirmation is durable; persist the verified login before any
+            # further result read can fail and leave the profile outdated.
+            profiles, identifiers = self.synchronize_profiles(self.store.profiles(), original, connection, params)
+            self.store.save(profiles, update_identifiers=identifiers)
+            if connection != original:
+                self.disconnect_connection(original.identifier)
+            # verify_task supplied the authoritative, idempotent confirmation
+            # result; do not add an unnecessary post-confirmation SSH round-trip.
         self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": status["state"], "created": created, "message": ssh.redactor.text(status["message"])})
         if status["state"] != "succeeded":
             if deployment and pending_values is not None and preflight["installed"] and status["state"] in {"failed", "rolled_back"}:
@@ -276,6 +372,16 @@ class Controller:
             for profile in profiles:
                 if profile.host == original.host and profile.username == params["username"]:
                     self.store.vault.delete(vault_alias("security-recovery", profile.identifier))
+        if params["operation"] in {"delete_user", "rename_user"}:
+            target = params["old_username"] if params["operation"] == "rename_user" else params["username"]
+            aliases = {vault_alias("task-password", row["task_id"]) for row in self.store.history() if row.get("operation") in {"create_admin", "password"} and isinstance(row.get("task_id"), str)}
+            for alias in aliases:
+                saved = self.store.vault.get(alias)
+                if saved.get("host") == original.host and saved.get("username") == target:
+                    if params["operation"] == "delete_user":
+                        self.store.vault.delete(alias)
+                    else:
+                        self.store.vault.put(alias, saved | {"username": params["new_username"]})
         return status, connection
 
     def synchronize_profiles(self, profiles, original, updated, params):

@@ -50,7 +50,8 @@ class EncryptedKeyTests(unittest.TestCase):
             transport.redactor = Redactor()
             transport.call.side_effect = [{"task_id": "a" * 24}, {"state": "succeeded", "message": "完成。"}]
             controller.transport = mock.Mock(return_value=transport)
-            controller.execute(connection, {"operation": "prepare_key", "username": "owner", "public_key": "ssh-ed25519 AAAA", "local_key_path": "fictional-key", "local_key_passphrase": "fictional-private-phrase"})
+            with mock.patch("linux_manager.controller.secrets.token_hex", return_value="a" * 24):
+                controller.execute(connection, {"operation": "prepare_key", "username": "owner", "public_key": "ssh-ed25519 AAAA", "local_key_path": "fictional-key", "local_key_passphrase": "fictional-private-phrase"})
             packet = transport.call.call_args_list[0].args[0]
             self.assertFalse(any(k.startswith("local_") for k in packet["params"]))
             self.assertNotIn("fictional-private-phrase", json.dumps(packet))
@@ -118,6 +119,16 @@ class SecurityPlanTests(unittest.TestCase):
             journals = list((Path(folder) / "security-plans").glob("*.json"))
             self.assertTrue(any(json.loads(p.read_text()).get("state") == "incomplete" for p in journals))
             self.assertTrue(all(result["connection"].key_passphrase not in p.read_text() for p in journals))
+
+    def test_update_scheduler_failure_keeps_verified_login_but_reports_incomplete_plan(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller, original, _, operations = self.fixture(folder, "updates")
+            result = controller.security_plan(original, {"mode": "rename", "username": "changed"})
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["connection"].username, "changed")
+            self.assertEqual(operations[-1], {"operation": "updates", "enabled": True})
+            self.assertNotIn("启用安全更新（不自动重启）", [stage["step"] for stage in result["stages"]])
+            self.assertEqual(controller.store.profiles()[-1].username, "changed")
 
     def test_preflight_or_vault_failure_submits_no_remote_mutation(self):
         with tempfile.TemporaryDirectory() as folder:
