@@ -89,7 +89,7 @@ def main():
     Path("/etc/letsencrypt/cli.ini").write_text("server = https://localhost:14000/dir\n")
     log = (artifacts / "pebble.log").open("w")
     pebble = subprocess.Popen([str(args.pebble_binary.resolve()), "-config", str(configuration)], cwd=source,
-                              stdout=log, stderr=log, env=os.environ | {"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"})
+                              stdout=log, stderr=log, env=os.environ | {"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0", "PEBBLE_AUTHZREUSE": "0"})
     try:
         for _ in range(60):
             try:
@@ -156,7 +156,7 @@ def main():
         # normal deploy hook, rather than wait for natural certificate expiry.
         override = Path("/etc/systemd/system/linux-manager-cert-renew.service.d/ci.conf")
         override.parent.mkdir()
-        forced = remote.certbot_arguments("renew") + ["--quiet", "--force-renewal"]
+        forced = remote.certbot_arguments("renew") + ["--quiet", "--force-renewal", "--no-random-sleep-on-renew"]
         override.write_text("[Service]\nEnvironment=REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt\nExecStart=\nExecStart=" + " ".join(forced) + "\n")
         run(["systemctl", "daemon-reload"])
         identities = {unit: service_identity(unit) for unit in ["nginx.service", *remote.UNITS["exchange"]]}
