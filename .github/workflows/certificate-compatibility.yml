@@ -1,0 +1,87 @@
+name: Certificate compatibility
+
+on:
+  push:
+    branches: [main, 'codex/nginx-certificate-compatibility*']
+    paths:
+      - 'linux_manager/**'
+      - 'tests/**'
+      - 'tools/ci_certificate_integration.py'
+      - '.github/workflows/certificate-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install regression dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends nginx python3-tk xvfb xauth
+          sudo mkdir -p /private/tmp
+          sudo chmod 1777 /private/tmp
+      - name: Run related regressions with native Nginx
+        env:
+          LINUX_MANAGER_TEST_NGINX: /usr/sbin/nginx
+        run: |
+          xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -p 'test_certificate_nginx_compatibility.py' -v
+          xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -p 'test_redeployment.py' -v
+          xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -p 'test_uninstallation.py' -v
+          xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -p 'test_deployment_preflight.py' -v
+          xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -p 'test_prerelease_safety.py' -v
+
+  real-installation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - order: nginx-first
+            address: exchange.test
+            web_port: 80
+          - order: exchange-first
+            address: exchange.test
+            web_port: 80
+          - order: nginx-first
+            address: 127.0.0.1
+            web_port: 8080
+          - order: exchange-first
+            address: 127.0.0.1
+            web_port: 8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: letsencrypt/pebble
+          ref: d52948ce25e7c1576bcd18ff0e20a1c24ec7c44b # v2.8.0
+          path: .ci-pebble
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - name: Build local ACME test CA
+        working-directory: .ci-pebble
+        run: go build -o "${RUNNER_TEMP}/pebble" ./cmd/pebble
+      - name: Prepare fresh system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends python3-venv python3-tk ca-certificates openssl logrotate
+          sudo systemctl stop nginx.service || true
+      - name: Install official exchange and verify certificate lifecycle
+        run: >-
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_TEMP /usr/bin/python3
+          tools/ci_certificate_integration.py
+          --order '${{ matrix.order }}' --address '${{ matrix.address }}'
+          --web-port '${{ matrix.web_port }}'
+          --pebble-source .ci-pebble --pebble-binary "${RUNNER_TEMP}/pebble"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: certificate-${{ matrix.order }}-${{ matrix.web_port }}
+          path: ${{ runner.temp }}/certificate-acceptance/result.json
+          if-no-files-found: error
