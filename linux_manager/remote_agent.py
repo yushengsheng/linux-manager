@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import configparser
 import datetime
 import fcntl
 import fnmatch
@@ -44,6 +45,10 @@ TASK = None
 SECRETS = set()
 APT_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
 UPDATE_CONFIG = "/etc/apt/apt.conf.d/90-linux-manager-updates"
+CERTIFICATE_CONFIG = "/etc/linux-server-manager/letsencrypt"
+CERTIFICATE_WEBROOT = "/var/lib/linux-manager-acme-webroot"
+NGINX_MANAGED_SITE = "/etc/nginx/conf.d/linux-manager-default.conf"
+NGINX_ACME_SITE = "/etc/nginx/conf.d/linux-manager-acme.conf"
 
 
 def update_configuration_paths():
@@ -1171,7 +1176,7 @@ def cert_hook():
     if installed.get("exchange", {}).get("certificate_source") == "manager" and not installed["exchange"].get("uninstalled"):
         lineage = installed["exchange"].get("certificate_lineage", "/etc/linux-server-manager/letsencrypt/live/manager")
         script += 'if [ "$RENEWED_LINEAGE" = ' + shlex.quote(lineage) + ' ]; then\n'
-        script += '  install -m 600 "$RENEWED_LINEAGE/fullchain.pem" /etc/xiaojun-exchange/tls/fullchain.pem && install -m 600 "$RENEWED_LINEAGE/privkey.pem" /etc/xiaojun-exchange/tls/privkey.pem && systemctl reload xiaojun-exchange-nginx.service\nfi\n'
+        script += '  install -m 600 "$RENEWED_LINEAGE/fullchain.pem" /etc/xiaojun-exchange/tls/fullchain.pem && install -m 600 "$RENEWED_LINEAGE/privkey.pem" /etc/xiaojun-exchange/tls/privkey.pem && nginx -t -c /etc/xiaojun-exchange/nginx.conf && systemctl reload xiaojun-exchange-nginx.service || exit 1\nfi\n'
     for service in ["hysteria2", "xui"]:
         if service in installed and not installed[service].get("uninstalled"):
             lineage = proxy_certificate_lineage(service)
@@ -1203,6 +1208,183 @@ def certificate_name(address, legacy_exists, identity_matches):
     return "manager" if not legacy_exists or identity_matches else "manager-" + hashlib.sha256(address.encode()).hexdigest()[:12]
 
 
+def certificate_renewals():
+    result = []
+    for file in sorted(Path(CERTIFICATE_CONFIG + "/renewal").glob("*.conf")):
+        require(not file.is_symlink(), "证书续期配置是自定义链接，不能自动迁移。")
+        config = configparser.RawConfigParser()
+        try:
+            # Certbot's ConfigObj files have top-level values before sections.
+            config.read_string("[DEFAULT]\n" + file.read_text())
+            authenticator = config.get("renewalparams", "authenticator")
+            webroot = config.get("renewalparams", "webroot_path", fallback="").strip().rstrip(",").strip()
+        except (OSError, configparser.Error):
+            raise OperationError("证书续期配置无法读取，已保留原配置。") from None
+        require(authenticator in {"standalone", "webroot"}, "证书使用自定义验证方式，不能自动迁移。")
+        require(re.fullmatch(r"[A-Za-z0-9._-]+", file.stem), "证书续期名称无法识别。")
+        result.append((file, authenticator, webroot))
+    return result
+
+
+def certificate_webroot_needed():
+    renewals = certificate_renewals()
+    if not renewals:
+        return False
+    site = Path(NGINX_MANAGED_SITE)
+    if not site.is_file() or not Path(NGINX_ACME_SITE).is_file():
+        return True
+    match = re.search(r"listen\s+(\d+)", site.read_text())
+    if not match or int(match.group(1)) == 80 and nginx_acme_location() not in site.read_text():
+        return True
+    timer = unit_info("linux-manager-cert-renew.timer")
+    hook = Path(CERTIFICATE_CONFIG + "/renewal-hooks/deploy/linux-manager-proxies")
+    if not hook.is_file():
+        return True
+    records = ROOT / "installed.json"
+    exchange = json.loads(records.read_text()).get("exchange", {}) if records.is_file() else {}
+    if exchange.get("certificate_source") == "manager" and not exchange.get("uninstalled"):
+        if exchange.get("certificate_lineage", CERTIFICATE_CONFIG + "/live/manager") not in hook.read_text() or "reload xiaojun-exchange-nginx.service" not in hook.read_text():
+            return True
+    return any(auth != "webroot" or root != CERTIFICATE_WEBROOT for _, auth, root in renewals) or timer.get("ActiveState") != "active" or timer.get("UnitFileState") != "enabled"
+
+
+def certificate_renewal_addresses():
+    addresses = set()
+    for file, _, _ in certificate_renewals():
+        certificate = Path(CERTIFICATE_CONFIG + "/live") / file.stem / "fullchain.pem"
+        result = command(["openssl", "x509", "-in", str(certificate), "-noout", "-ext", "subjectAltName"])
+        names = re.findall(r"(?:DNS:|IP Address:)([^,\s]+)", result.stdout)
+        require(names, "已有证书缺少可识别的访问地址，不能自动迁移续期。")
+        addresses.update(host(name) for name in names)
+    return addresses
+
+
+def nginx_acme_location():
+    return " location ^~ /.well-known/acme-challenge/ {\n  root " + CERTIFICATE_WEBROOT + ";\n  default_type text/plain;\n  try_files $uri =404;\n }\n"
+
+
+def verify_certificate_webroot(addresses):
+    challenge = Path(CERTIFICATE_WEBROOT + "/.well-known/acme-challenge")
+    require(challenge.resolve() == challenge.absolute(), "证书验证目录含自定义链接，不能自动写入。")
+    for folder in [challenge.parent, challenge]:
+        folder.mkdir(mode=0o755, parents=True, exist_ok=True)
+        folder.chmod(0o755)
+    token = secrets.token_hex(24)
+    file = challenge / token
+    private_write(file, token, 0o644)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        for address in sorted(addresses):
+            request = urllib.request.Request("http://127.0.0.1/.well-known/acme-challenge/" + token, headers={"Host": address})
+            for attempt in range(10):
+                try:
+                    with opener.open(request, timeout=5) as response:
+                        require(response.status == 200 and response.read(len(token) + 1) == token.encode(), "证书验证路径被其他网页配置拦截，已保留原入口。")
+                    break
+                except (OSError, urllib.error.URLError):
+                    if attempt == 9:
+                        raise OperationError("Nginx 证书验证路径不可访问，已保留原入口。") from None
+                    time.sleep(0.2)
+    finally:
+        file.unlink(missing_ok=True)
+
+
+def prepare_certificate_webroot(addresses):
+    site = Path(NGINX_MANAGED_SITE)
+    require(not site.is_symlink() and site.is_file() and site.read_text().startswith("# Managed by linux-server-manager\n"), "TCP 80 的网页入口不属于本程序，不能自动修改证书验证配置。")
+    text = site.read_text()
+    match = re.search(r"listen\s+(\d+)", text)
+    require(match is not None, "本程序的 Nginx 入口端口无法识别。")
+    names = set(addresses)
+    location = nginx_acme_location()
+    if int(match.group(1)) == 80:
+        if location not in text:
+            require("/.well-known/acme-challenge/" not in text and text.rstrip().endswith("}"), "发现自定义证书验证路径，已保留原配置。")
+            text = text.rstrip()[:-1] + location + "}\n"
+        name = re.search(r"server_name\s+([^;]+);", text)
+        if name:
+            names.difference_update(name.group(1).split())
+    acme = Path(NGINX_ACME_SITE)
+    require(not acme.is_symlink() and (not acme.exists() or acme.read_text().startswith("# Managed by linux-server-manager\n")), "证书验证站点存在自定义配置，不能覆盖。")
+    configuration = "# Managed by linux-server-manager\nserver {\n listen 80;\n listen [::]:80;\n server_name " + " ".join(sorted(names) or ["_"]) + ";\n access_log off;\n" + location + " location / { return 404; }\n}\n"
+    originals = [(file, file.read_bytes() if file.exists() else None, file.stat().st_mode & 0o777 if file.exists() else 0o644) for file in [site, acme]]
+    webroot = Path(CERTIFICATE_WEBROOT)
+    require(webroot.resolve() == webroot.absolute(), "证书验证目录是自定义链接，不能自动写入。")
+    webroot.mkdir(mode=0o755, parents=True, exist_ok=True)
+    webroot.chmod(0o755)
+    try:
+        private_write(site, text, 0o644)
+        private_write(acme, configuration, 0o644)
+        command(["nginx", "-t"])
+        command(["systemctl", "reload", "nginx.service"])
+        verify_certificate_webroot(addresses)
+    except Exception:
+        for file, content, mode in originals:
+            if content is None:
+                file.unlink(missing_ok=True)
+            else:
+                private_write(file, content, mode)
+        command(["nginx", "-t"])
+        command(["systemctl", "reload", "nginx.service"])
+        raise
+
+
+def ensure_certbot():
+    environment = Path("/opt/linux-server-manager/certbot")
+    if not (environment / "bin/certbot").is_file():
+        apt(["python3-venv", "ca-certificates", "openssl"])
+        command(["python3", "-m", "venv", str(environment)], timeout=90)
+        require(TASK is not None, "证书工具修复需要后台安装任务。")
+        lock = TASK / "certbot-requirements.txt"
+        private_write(lock, globals().get("CERTBOT_LOCK", ""))
+        require(lock.stat().st_size > 100, "证书依赖清单缺失，不能自动申请证书。")
+        command([str(environment / "bin/python"), "-m", "pip", "install", "--require-hashes", "--no-cache-dir", "-r", str(lock)], timeout=600)
+    return str(environment / "bin/certbot")
+
+
+def certbot_arguments(verb):
+    return [ensure_certbot(), verb, "--non-interactive", "--config-dir", CERTIFICATE_CONFIG, "--work-dir", "/var/lib/linux-server-manager/acme", "--logs-dir", "/var/log/linux-server-manager-acme"]
+
+
+def pause_certificate_renewal():
+    require(unit_info("linux-manager-cert-renew.service").get("ActiveState") not in {"active", "activating"}, "证书正在续期，请等待完成后再安装 Nginx。")
+    command(["systemctl", "stop", "linux-manager-cert-renew.timer"])
+    require(unit_info("linux-manager-cert-renew.service").get("ActiveState") not in {"active", "activating"}, "证书正在续期，请等待完成后再安装 Nginx。")
+
+
+def migrate_certificate_renewals():
+    renewals = certificate_renewals()
+    if all(auth == "webroot" and root == CERTIFICATE_WEBROOT for _, auth, root in renewals):
+        return
+    timer = unit_info("linux-manager-cert-renew.timer")
+    originals = [(file, file.read_bytes(), file.stat().st_mode & 0o777) for file, _, _ in renewals]
+    try:
+        pause_certificate_renewal()
+        for file, authenticator, webroot in renewals:
+            if authenticator != "webroot" or webroot != CERTIFICATE_WEBROOT:
+                try:
+                    command(certbot_arguments("reconfigure") + ["--cert-name", file.stem, "--webroot", "--webroot-path", CERTIFICATE_WEBROOT], timeout=300)
+                except OperationError as error:
+                    raise OperationError("证书续期验证未通过。请确认云平台 TCP 80 已放行且访问地址指向本机；原续期配置会恢复。" + str(error)) from None
+        require(all(auth == "webroot" and root == CERTIFICATE_WEBROOT for _, auth, root in certificate_renewals()), "证书续期方式迁移未生效，已保留原配置。")
+    except Exception:
+        for file, content, mode in originals:
+            private_write(file, content, mode)
+        raise
+    finally:
+        if timer.get("ActiveState") == "active":
+            command(["systemctl", "start", "linux-manager-cert-renew.timer"])
+
+
+def ensure_certificate_renewal():
+    executable = ensure_certbot()
+    private_write("/etc/systemd/system/linux-manager-cert-renew.service", "[Unit]\nDescription=Renew Linux manager certificates\n[Service]\nType=oneshot\nExecStart=" + executable + " renew --quiet --config-dir " + CERTIFICATE_CONFIG + " --work-dir /var/lib/linux-server-manager/acme --logs-dir /var/log/linux-server-manager-acme\n", 0o644)
+    private_write("/etc/systemd/system/linux-manager-cert-renew.timer", "[Unit]\nDescription=Check Linux manager certificates\n[Timer]\nOnBootSec=10min\nOnUnitActiveSec=12h\nPersistent=true\n[Install]\nWantedBy=timers.target\n", 0o644)
+    cert_hook()
+    command(["systemctl", "daemon-reload"])
+    command(["systemctl", "enable", "--now", "linux-manager-cert-renew.timer"])
+
+
 def ensure_certificate(address):
     import ipaddress
     try:
@@ -1216,25 +1398,28 @@ def ensure_certificate(address):
     if matches(exchange_base / "fullchain.pem") and (exchange_base / "privkey.pem").is_file():
         return str(exchange_base / "fullchain.pem"), str(exchange_base / "privkey.pem")
     own_base = Path("/etc/linux-server-manager/letsencrypt/live/manager")
+    site = Path(NGINX_MANAGED_SITE)
+    webroot = site.is_file() and unit_info("nginx.service").get("ActiveState") == "active"
+    if webroot:
+        prepare_certificate_webroot(certificate_renewal_addresses() | {address})
+        migrate_certificate_renewals()
     if matches(own_base / "fullchain.pem") and (own_base / "privkey.pem").is_file():
+        require((Path(CERTIFICATE_CONFIG + "/renewal") / (own_base.name + ".conf")).is_file(), "已有证书的续期资料缺失，不能保证自动续期；请先恢复证书续期配置。")
+        ensure_certificate_renewal()
         return str(own_base / "fullchain.pem"), str(own_base / "privkey.pem")
     legacy = own_base / "fullchain.pem"
     same_identity = legacy.is_file() and command(["openssl", "x509", "-in", str(legacy), "-noout", check_argument, address], check=False).returncode == 0
     name = certificate_name(address, legacy.is_file(), same_identity)
     own_base = own_base.parent / name
     if matches(own_base / "fullchain.pem") and (own_base / "privkey.pem").is_file():
+        require((Path(CERTIFICATE_CONFIG + "/renewal") / (own_base.name + ".conf")).is_file(), "已有证书的续期资料缺失，不能保证自动续期；请先恢复证书续期配置。")
+        ensure_certificate_renewal()
         return str(own_base / "fullchain.pem"), str(own_base / "privkey.pem")
-    require(not any(x["port"] == 80 and x["protocol"] == "tcp" for x in listeners()), "申请证书需要空闲的 TCP 80。已有网页服务保持原样；请使用现有证书覆盖的访问地址，或先在空闲服务器部署。")
-    apt(["python3-venv", "ca-certificates", "openssl"])
-    environment = Path("/opt/linux-server-manager/certbot")
-    if not (environment / "bin/certbot").is_file():
-        command(["python3", "-m", "venv", str(environment)], timeout=90)
-        lock = TASK / "certbot-requirements.txt"
-        private_write(lock, globals().get("CERTBOT_LOCK", ""))
-        require(lock.stat().st_size > 100, "证书依赖清单缺失，不能自动申请证书。")
-        command([str(environment / "bin/python"), "-m", "pip", "install", "--require-hashes", "--no-cache-dir", "-r", str(lock)], timeout=600)
+    if not webroot:
+        require(not any(x["port"] == 80 and x["protocol"] == "tcp" for x in listeners()), "申请证书需要可用的 TCP 80。请通过本程序部署 Nginx 网页入口以自动兼容证书验证；其他网页服务不会被覆盖。")
     allow_port(80)
-    args = [str(environment / "bin/certbot"), "certonly", "--standalone", "--non-interactive", "--agree-tos", "--register-unsafely-without-email", "--cert-name", name, "--config-dir", "/etc/linux-server-manager/letsencrypt", "--work-dir", "/var/lib/linux-server-manager/acme", "--logs-dir", "/var/log/linux-server-manager-acme"]
+    args = certbot_arguments("certonly") + ["--agree-tos", "--register-unsafely-without-email", "--cert-name", name]
+    args += ["--webroot", "--webroot-path", CERTIFICATE_WEBROOT] if webroot else ["--standalone"]
     import ipaddress
     try:
         ipaddress.IPv4Address(address)
@@ -1248,10 +1433,7 @@ def ensure_certificate(address):
         if any(word in message for word in ["timeout during connect", "connection refused", "unauthorized", "challenge failed", "challenges have failed"]):
             raise OperationError("证书验证未通过。请在云平台安全组放行 TCP 80，确认访问地址指向本机后重试；项目尚未安装，不会覆盖已有数据。") from None
         raise
-    private_write("/etc/systemd/system/linux-manager-cert-renew.service", "[Unit]\nDescription=Renew Linux manager certificates\n[Service]\nType=oneshot\nExecStart=" + str(environment / "bin/certbot") + " renew --quiet --config-dir /etc/linux-server-manager/letsencrypt --work-dir /var/lib/linux-server-manager/acme --logs-dir /var/log/linux-server-manager-acme\n", 0o644)
-    private_write("/etc/systemd/system/linux-manager-cert-renew.timer", "[Unit]\nDescription=Check Linux manager certificates\n[Timer]\nOnBootSec=10min\nOnUnitActiveSec=12h\nPersistent=true\n[Install]\nWantedBy=timers.target\n", 0o644)
-    command(["systemctl", "daemon-reload"])
-    command(["systemctl", "enable", "--now", "linux-manager-cert-renew.timer"])
+    ensure_certificate_renewal()
     return str(own_base / "fullchain.pem"), str(own_base / "privkey.pem")
 
 

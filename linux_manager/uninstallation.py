@@ -19,6 +19,23 @@ def _uninstall_records():
     return value
 
 
+def _nginx_acme_without_site():
+    acme = _uninstall_safe_path(NGINX_ACME_SITE)
+    site = Path(NGINX_MANAGED_SITE)
+    if not acme.is_file() or not site.is_file():
+        return None
+    before = acme.read_text()
+    require(before.startswith("# Managed by linux-server-manager\n"), "证书验证站点归属无法确认，不能调整共享续期入口。")
+    match = re.search(r"server_name\s+([^;]+);", site.read_text())
+    current = re.search(r"server_name\s+([^;]+);", before)
+    require(match and current, "证书验证站点地址无法识别，不能保证移除网页后继续续期。")
+    names = set(current.group(1).split()) | set(match.group(1).split())
+    for name in names:
+        if name != "_": host(name)
+    after = re.sub(r"(server_name\s+)[^;]+;", lambda match: match.group(1) + " ".join(sorted(names)) + ";", before)
+    return {"before": before, "after": after, "mode": acme.stat().st_mode & 0o777}
+
+
 def _uninstall_paths(kind):
     layout = UNINSTALL_LAYOUTS[kind]
     return layout["programs"] + ["/etc/systemd/system/" + unit for unit in layout["units"]] + layout["extras"]
@@ -129,7 +146,8 @@ def uninstall_preflight(params):
             require(Path(paths[0]).read_text().startswith("# Managed by linux-server-manager\n"), "Nginx 站点归属无法确认，不能移除自定义网站。")
         _uninstall_references(kind)
         action = "unchanged" if record.get("uninstalled") and not stamps and all(state["LoadState"] == "not-found" for state in states.values()) else "uninstall"
-        fingerprint = hashlib.sha256(json.dumps({"service": kind, "record": record, "files": stamps, "states": states}, sort_keys=True).encode()).hexdigest()
+        acme = _nginx_acme_without_site() if kind == "nginx" else None
+        fingerprint = hashlib.sha256(json.dumps({"service": kind, "record": record, "files": stamps, "states": states, "nginx_acme": acme}, sort_keys=True).encode()).hexdigest()
         return {"service": kind, "action": action, "fingerprint": fingerprint, "remove_paths": [row["path"] for row in stamps], "retained_paths": layout["retain"], "units": states,
                 "message": "仅移除本程序的独立站点；保留共享 Nginx 核心和其他网站。" if kind == "nginx" else "移除项目程序及专属服务，配置与业务数据留在原位置。"}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, sqlite3.DatabaseError):
@@ -148,6 +166,9 @@ def restore_uninstall(identifier):
     records = _uninstall_records()
     current = records.get(kind, {})
     require(current == saved["record"] or current.get("uninstall_task") == identifier, "安装记录已被其他操作改变，不覆盖新项目记录。")
+    if kind == "nginx" and saved.get("nginx_acme"):
+        acme = _uninstall_safe_path(NGINX_ACME_SITE)
+        require(acme.is_file() and acme.read_text() in {saved["nginx_acme"]["before"], saved["nginx_acme"]["after"]}, "证书验证站点已被其他操作改变，不覆盖新配置。")
     for index, name in enumerate(saved["paths"]):
         source = _uninstall_safe_path(name); backup = _uninstall_safe_path(folder / "files" / str(index))
         require(source.exists() != backup.exists(), "原位置被占用或恢复备份缺失，不覆盖新安装；请检查卸载恢复记录。")
@@ -161,6 +182,9 @@ def restore_uninstall(identifier):
     records[kind] = saved["record"]
     write_json(ROOT / "installed.json", records)
     if kind == "nginx":
+        if saved.get("nginx_acme"):
+            acme = _uninstall_safe_path(NGINX_ACME_SITE)
+            private_write(acme, saved["nginx_acme"]["before"], saved["nginx_acme"]["mode"])
         command(["nginx", "-t"])
         if unit_info("nginx.service").get("ActiveState") == "active":
             command(["systemctl", "reload", "nginx.service"])
@@ -193,7 +217,8 @@ def uninstall_project(params):
     records = _uninstall_records()
     # Journal the entire fixed scope before stopping or moving anything. Atomic
     # renames preserve ownership and nested links without following their targets.
-    write_json(folder / "manifest.json", {"service": kind, "paths": plan["remove_paths"], "units": plan["units"], "record": records[kind]})
+    acme = _nginx_acme_without_site() if kind == "nginx" else None
+    write_json(folder / "manifest.json", {"service": kind, "paths": plan["remove_paths"], "units": plan["units"], "record": records[kind], "nginx_acme": acme})
     step("停止目标项目并保存移除文件；配置、账号和业务数据保持原位…", 20)
     loaded = [unit for unit, state in plan["units"].items() if state["LoadState"] == "loaded"]
     if loaded:
@@ -207,6 +232,8 @@ def uninstall_project(params):
         os.rename(source, folder / "files" / str(index))
     step("验证项目服务已移除，保留共享系统依赖与防火墙规则…", 75)
     if kind == "nginx":
+        if acme:
+            private_write(NGINX_ACME_SITE, acme["after"], acme["mode"])
         command(["nginx", "-t"])
         if unit_info("nginx.service").get("ActiveState") == "active":
             command(["systemctl", "reload", "nginx.service"])

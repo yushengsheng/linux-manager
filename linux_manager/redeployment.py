@@ -99,7 +99,7 @@ def _bootstrap_reset_allowed():
 
 
 def _state_fingerprint(data):
-    values = {key: data.get(key) for key in ["installed", "version", "host", "port", "backend_port", "proxy_password", "panel_username", "_password_hash", "_ready", "_present"]}
+    values = {key: data.get(key) for key in ["installed", "version", "host", "port", "backend_port", "proxy_password", "panel_username", "_password_hash", "_ready", "_present", "_certificate_state"]}
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
@@ -134,6 +134,11 @@ def deployment_preflight(params):
     change("version", requested, "版本")
     change("port", number, "服务端口")
     change("host", address, "访问地址")
+    if kind == "nginx" and certificate_renewals():
+        files = [file for file, _, _ in certificate_renewals()] + [Path(NGINX_ACME_SITE), Path(NGINX_MANAGED_SITE), Path(CERTIFICATE_CONFIG + "/renewal-hooks/deploy/linux-manager-proxies"), ROOT / "installed.json"]
+        data["_certificate_state"] = {"files": [(str(file), hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None) for file in files], "timer": unit_info("linux-manager-cert-renew.timer")}
+    if kind == "nginx" and certificate_webroot_needed():
+        changes.append({"field": "certificate_renewal", "name": "证书自动续期兼容", "before": "需要补齐", "after": "通过 Nginx 验证并启用续期"})
     if kind == "exchange":
         backend = port(params.get("backend_port", data.get("backend_port", 18880)))
         require(backend != number, "访问端口和内部端口不能相同。")
@@ -203,6 +208,9 @@ def _deployment_backup(kind, action):
         "nginx": ["/etc/nginx"],
     }[kind]
     units = _deployment_units(kind)
+    if kind == "nginx" and certificate_renewals():
+        paths += [CERTIFICATE_CONFIG + "/renewal", CERTIFICATE_CONFIG + "/renewal-hooks"]
+        units += ["linux-manager-cert-renew.service", "linux-manager-cert-renew.timer"]
     if kind == "exchange" and action in {"update", "repair", "retry"}:
         paths += ["/var/lib/xiaojun-exchange"]
         units += ["xiaojun-exchange-maintenance.timer", "xiaojun-exchange-logrotate.timer"]
@@ -212,6 +220,8 @@ def _deployment_backup(kind, action):
     if action == "retry":
         paths += ["/opt/xiaojun-exchange"]
     state = {unit: unit_info(unit) for unit in units}
+    if kind == "nginx":
+        require(state.get("linux-manager-cert-renew.service", {}).get("ActiveState") not in {"active", "activating"}, "证书正在续期，请等待完成后再安装 Nginx。")
     paths += ["/etc/systemd/system/" + unit for unit in units] + [str(ROOT / "installed.json"), "/etc/linux-server-manager/tls"]
     require(shutil.disk_usage("/").free >= _deployment_backup_size(paths) + 1024 ** 3,
             "空间不足以备份原项目并保留运行空间，现有服务未停止。请先增加磁盘可用空间。")
@@ -234,6 +244,8 @@ def restore_deployment(identifier):
     extra = manifest["extra"]
     units = list(extra["unit_states"])
     for unit in units:
+        if extra["service"] == "nginx" and unit == "linux-manager-cert-renew.service":
+            continue
         if unit_info(unit).get("LoadState") == "loaded": command(["systemctl", "stop", unit], timeout=360, check=False)
     if extra.get("nginx_version") and _nginx_package()[0] != extra["nginx_version"]:
         folder = ROOT / "tasks" / identifier / "nginx-original-packages"
@@ -243,6 +255,16 @@ def restore_deployment(identifier):
     restore_files(identifier)
     cert_hook()
     for unit, state in extra["unit_states"].items():
+        if extra["service"] == "nginx" and unit == "linux-manager-cert-renew.service":
+            # An independent oneshot may have started after the backup. Never
+            # kill/re-run a live certificate renewal as part of site rollback.
+            continue
+        if state.get("LoadState") == "masked" or state.get("UnitFileState") == "masked":
+            command(["systemctl", "mask", unit])
+            require(unit_info(unit).get("LoadState") == "masked", "原服务屏蔽状态恢复未通过，请查看任务记录。")
+            continue
+        if state.get("LoadState") == "not-found" and unit == "linux-manager-cert-renew.timer":
+            command(["systemctl", "disable", unit], check=False)
         if state.get("LoadState") == "loaded":
             startup = state.get("UnitFileState")
             if startup in {"enabled", "disabled"}:
@@ -461,6 +483,9 @@ def _default_nginx_site_unchanged():
 
 
 def _change_nginx(params, plan):
+    renewals = certificate_renewals()
+    if renewals:
+        pause_certificate_renewal()
     current, _ = _nginx_package()
     if current != plan["version"]:
         if current:
@@ -494,10 +519,16 @@ def _change_nginx(params, plan):
         command(["systemctl", "daemon-reload"])
     command(["systemctl", "enable", "nginx.service"]); command(["systemctl", "reload-or-restart", "nginx.service"])
     require(unit_info("nginx.service").get("ActiveState") == "active", "Nginx 新配置未正常启动。")
+    if renewals:
+        prepare_certificate_webroot(certificate_renewal_addresses())
+        allow_port(80)
+        migrate_certificate_renewals()
+        ensure_certificate_renewal()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request("http://127.0.0.1:" + str(plan["port"]) + "/", headers={"Host": plan["host"]})
     for attempt in range(20):
         try:
-            with opener.open("http://127.0.0.1:" + str(plan["port"]) + "/", timeout=5) as response:
+            with opener.open(request, timeout=5) as response:
                 require(response.status == 200, "Nginx 网页检查未通过。")
             break
         except (OSError, urllib.error.URLError):
