@@ -1,18 +1,18 @@
 # linux服务器管理
 
-在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.9**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
+在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.10**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
 
 ## 下载与更新
 
-从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.9.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
+从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.10.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
 
 先正常退出旧程序再打开新版。沿用原本机档案、私钥及钥匙串，不需要重新添加服务器；新版可能需要再次允许访问钥匙串。本包使用临时签名，未经过 Apple 开发者公证：确认下载来源和校验值后，如系统拦截，按 macOS「隐私与安全性」的提示允许打开，不要关闭系统安全检查。
 
-更新说明见 [v0.3.9 发布说明](RELEASE_NOTES.md)。
+更新说明见 [v0.3.10 发布说明](RELEASE_NOTES.md)。
 
 ## 功能
 
-最新源码已修复 Nginx 网页入口与小军交易系统按任意顺序安装的证书申请和续期兼容，并通过 [GitHub 全新 Ubuntu 实测](https://github.com/yushengsheng/linux-manager/actions/runs/38135903240)。现有 v0.3.9 App／ZIP 尚未重新构建，不包含此项修复；详细验证范围见[测试记录](linux服务器管理测试记录.md)。
+v0.3.10 源码与独立 App／ZIP 均包含 Nginx 网页入口与小军交易系统按任意顺序安装的证书申请和续期兼容修复，已通过 [GitHub 全新 Ubuntu 实测](https://github.com/yushengsheng/linux-manager/actions/runs/38136138493)。已有两项目共存的服务器，可保留 Nginx 当前参数再次预览并部署，补齐续期兼容；升级管理器不会自动修改服务器。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
 
 - 左侧保存多台服务器与多账号档案；点击即可使用保存的登录信息连接，可用连接直接复用。
 - 单机工作区：概览、应用管理、账号、安全与操作记录；全部既有功能保留。
