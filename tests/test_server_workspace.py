@@ -307,7 +307,8 @@ class ServerWorkspaceTests(unittest.TestCase):
                 inspect(child)
         inspect(app)
         self.assertGreater(count, 100)
-        self.assertLessEqual(caption.measure("linux服务器管理"), font.Font(root=app, font=("PingFang SC", 12)).measure("linux服务器管理"))
+        if sys.platform == "darwin":
+            self.assertLessEqual(caption.measure("linux服务器管理"), font.Font(root=app, font=("PingFang SC", 12)).measure("linux服务器管理"))
 
     def test_all_pages_fit_default_and_existing_minimum_window_width(self):
         app = self.app

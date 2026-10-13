@@ -103,6 +103,10 @@ def main():
                         with socket.create_connection(('127.0.0.1',10880),timeout=1):break
                     except OSError:time.sleep(.2)
                 result=subprocess.run(['curl','--silent','--show-error','--fail','--noproxy','','--socks5-hostname','127.0.0.1:10880','--max-time','20','http://127.0.0.1:'+str(origin.server_port)+'/'],capture_output=True,timeout=25)
+                if result.returncode or result.stdout!=b'linux-manager-proxy-ok':
+                    print(remote.clean(result.stderr.decode()+'\n'+(artifacts/'client.log').read_text()),flush=True)
+                    if service=='reality':
+                        print(remote.clean(remote.command(['journalctl','--no-pager','-n','30','-u',remote.REALITY_UNIT],check=False).stdout),flush=True)
                 check(result.returncode==0 and result.stdout==b'linux-manager-proxy-ok', service+' actual SOCKS to proxy to HTTP traffic succeeded')
             finally:
                 client.terminate();client.wait(timeout=10)
