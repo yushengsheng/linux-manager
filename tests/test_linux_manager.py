@@ -91,8 +91,8 @@ class ReleaseSelectionTests(unittest.TestCase):
             variable = mock.Mock(); variable.get.return_value = value
             setattr(app, name, variable)
         app.controller = mock.Mock()
-        app.controller.deployment_preview.side_effect = lambda c, params: {"version":params["version"],"fingerprint":"fictional-preview","changes":[],"installed":False,"action":"install"}
-        app._run = mock.Mock(side_effect=lambda worker, callback, message: callback(worker()))
+        app.controller.deployment_preview.side_effect = lambda c, params, **kwargs: {"version":params.get("version", "v1.1.85"),"fingerprint":"fictional-preview","changes":[],"installed":False,"action":"install"}
+        app._run = mock.Mock(side_effect=lambda worker, callback, message, **kwargs: callback(worker()))
         return app
 
     def test_preview_submits_only_the_exact_version_shown(self):
@@ -100,7 +100,8 @@ class ReleaseSelectionTests(unittest.TestCase):
             app = self.app(mode); app._execute = mock.Mock()
             with mock.patch("linux_manager.gui.exchange_version", return_value=version) as resolve:
                 app._deploy()
-            resolve.assert_called_once_with(None if mode == LATEST_STABLE else "v1.1.84")
+            resolve.assert_not_called()
+            if mode == LATEST_STABLE: version = "v1.1.85"
             params, description = app._execute.call_args.args
             self.assertEqual(params["version"], version)
             self.assertIn("目标版本：" + version, description)
@@ -109,7 +110,7 @@ class ReleaseSelectionTests(unittest.TestCase):
         app = self.app()
         with mock.patch("linux_manager.gui.exchange_version", return_value="v1.1.99"), mock.patch("linux_manager.gui.messagebox.askyesno", return_value=False) as confirm:
             app._deploy()
-        self.assertIn("v1.1.99", confirm.call_args.args[1])
+        self.assertIn("v1.1.85", confirm.call_args.args[1])
         app.controller.execute.assert_not_called()
 
     def test_remote_rejects_unconfirmed_version_before_any_mutation(self):
@@ -142,20 +143,11 @@ class ReleaseSelectionTests(unittest.TestCase):
                 release["assets"][-1]["digest"] = "sha256:" + "0" * 64
                 with self.assertRaises(ManagerError): download_exchange("v1.1.99", destination)
 
-    def test_remote_upload_is_verified_and_kept_out_of_task_request(self):
-        content = b"a verified release"
-        params = {"operation": "deploy", "service": "exchange", "version": "v1.1.99", "release_archive": base64.b64encode(content).decode(), "release_sha256": hashlib.sha256(content).hexdigest()}
-        with tempfile.TemporaryDirectory() as folder:
-            base = Path(folder)
-            with mock.patch.object(REMOTE, "ROOT", base), mock.patch.object(REMOTE, "command", return_value=subprocess.CompletedProcess([], 0, "", "")):
-                task = REMOTE.start_task(params)["task_id"]
-                path = base / "tasks" / task
-                self.assertEqual((path / "release.tar.gz").read_bytes(), content)
-                request = json.loads((path / "request.json").read_text())
-                self.assertNotIn("release_archive", request)
-                self.assertEqual((path / "release.tar.gz").stat().st_mode & 0o777, 0o600)
+    def test_remote_rejects_old_archive_upload_before_launch(self):
+        params = {"operation": "deploy", "service": "exchange", "version": "v1.1.99", "release_archive": "obsolete-upload"}
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(REMOTE, "ROOT", Path(folder)), mock.patch.object(REMOTE, "command") as command:
-            with self.assertRaises(REMOTE.OperationError): REMOTE.start_task(params | {"release_sha256": "0" * 64})
+            with self.assertRaisesRegex(REMOTE.OperationError, "Linux 直接下载"):
+                REMOTE.start_task(params)
             command.assert_not_called()
 
 

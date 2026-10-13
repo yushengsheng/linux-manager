@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from .models import Connection, ManagerError, Redactor, atomic_private
 
@@ -23,6 +26,31 @@ class ConnectionInterrupted(ManagerError):
 
 class AuthenticationFailed(ManagerError):
     """Permanent authentication failure; never retry the same credentials."""
+
+
+class WaitingStopped(ManagerError):
+    """The local observer stopped; a detached Linux job may still be running."""
+
+
+def interruptible_ssh(args, *, cancel_event, timeout, **kwargs):
+    if cancel_event.is_set():
+        raise WaitingStopped("已停止本机等待。Linux 已收到的后台任务继续执行，请在操作记录中查看；勿重复安装。")
+    payload = kwargs.pop("input")
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs) as process:
+        while True:
+            if cancel_event.is_set() or time.monotonic() >= deadline:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                if cancel_event.is_set():
+                    raise WaitingStopped("已停止本机等待。Linux 已收到的后台任务继续执行，请在操作记录中查看；勿重复安装。")
+                raise subprocess.TimeoutExpired(args, timeout)
+            try:
+                stdout, stderr = process.communicate(input=payload, timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+                return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                payload = None
 
 BOOTSTRAP = "import sys,json,base64; lines=sys.stdin.read().splitlines(); packet=next(x[10:] for x in lines if x.startswith('LMREQUEST:')); e=json.loads(base64.b64decode(packet)); scope={'__name__':'linux_manager_remote','REQUEST':e['request'],'AGENT_SOURCE':e['agent'],'SSH_CONTEXT':sys.argv[1] if len(sys.argv)>1 else ''}; exec(compile(e['agent'],'<linux-manager-agent>','exec'),scope)"
 
@@ -157,13 +185,14 @@ class SSH:
             return "（连接诊断未能保存到本机。）"
         return "（脱敏连接诊断已保存在本机。）"
 
-    def call(self, request: dict, timeout: int = 60) -> dict:
+    def call(self, request: dict, timeout: int = 60, cancel_event=None) -> dict:
         self.connection.validate()
         if not self.trusted():
             raise ManagerError("请先确认服务器身份指纹，再建立连接。")
         source = Path(__file__).with_name("remote_agent.py").read_text()
         lock = Path(__file__).with_name("resources") / "requirements-certbot.lock"
         source = source.replace("#LM_BUNDLED_CERTBOT#", "CERTBOT_LOCK = " + repr(lock.read_text()))
+        source = source.replace("#LM_BUNDLED_SERVER_DOWNLOADS#", "LM_SERVER_DOWNLOADS_SOURCE = " + repr(Path(__file__).with_name("server_downloads.py").read_text()))
         source = source.replace("#LM_BUNDLED_REALITY#", "LM_REALITY_SOURCE = " + repr(Path(__file__).with_name("reality.py").read_text()))
         source = source.replace("#LM_BUNDLED_REDEPLOYMENT#", "LM_REDEPLOYMENT_SOURCE = " + repr(Path(__file__).with_name("redeployment.py").read_text()))
         source = source.replace("#LM_BUNDLED_UNINSTALLATION#", "LM_UNINSTALLATION_SOURCE = " + repr(Path(__file__).with_name("uninstallation.py").read_text()))
@@ -177,7 +206,9 @@ class SSH:
             with Askpass(folder, secret) as environment:
                 config = self._config(folder)
                 try:
-                    result = subprocess.run(["ssh", "-F", str(config), "-T", "linux-manager-server", command], input=payload, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=os.environ | environment, start_new_session=True)
+                    args = ["ssh", "-F", str(config), "-T", "linux-manager-server", command]
+                    options = dict(input=payload, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=os.environ | environment, start_new_session=True)
+                    result = interruptible_ssh(args, cancel_event=cancel_event, **options) if cancel_event is not None else subprocess.run(args, capture_output=True, **options)
                 except subprocess.TimeoutExpired:
                     note = self._failure(request, "timeout")
                     raise ConnectionInterrupted("连接超时。已提交的后台任务可能仍在运行，请重新连接并查看操作记录，不要重复部署。" + note) from None

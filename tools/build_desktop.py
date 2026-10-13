@@ -50,7 +50,7 @@ def main():
     python = str(environment / "bin/python")
     run([python, "-m", "pip", "install", "--disable-pip-version-check", "pyinstaller==6.22.0", "truststore==0.10.4", "segno==1.6.6"])
     print("隔离构建环境已准备。", flush=True)
-    run([python, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--name", "linux服务器管理", "--osx-bundle-identifier", "local.linuxservermanager.desktop", "--add-data", "linux_manager/remote_agent.py:linux_manager", "--add-data", "linux_manager/redeployment.py:linux_manager", "--add-data", "linux_manager/reality.py:linux_manager", "--add-data", "linux_manager/uninstallation.py:linux_manager", "--add-data", "linux_manager/resources:linux_manager/resources", "--distpath", str(WORK / "dist"), "--workpath", str(WORK / "build"), "linux服务器管理.py"], cwd=source)
+    run([python, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--name", "linux服务器管理", "--osx-bundle-identifier", "local.linuxservermanager.desktop", "--add-data", "linux_manager/remote_agent.py:linux_manager", "--add-data", "linux_manager/server_downloads.py:linux_manager", "--add-data", "linux_manager/redeployment.py:linux_manager", "--add-data", "linux_manager/reality.py:linux_manager", "--add-data", "linux_manager/uninstallation.py:linux_manager", "--add-data", "linux_manager/resources:linux_manager/resources", "--distpath", str(WORK / "dist"), "--workpath", str(WORK / "build"), "linux服务器管理.py"], cwd=source)
     bundle = WORK / "dist/linux服务器管理.app"
     # A release must never contain local connection profiles or private keys.
     forbidden = {"profiles.json", "history.json", "current.json", "test-connection.json", "known_hosts", "askpass.sock"}

@@ -127,6 +127,8 @@ def deployment_preflight(params):
         if requested != data.get("version"):
             require(command(["apt-cache", "show", "nginx=" + requested], check=False).returncode == 0, "系统仓库没有所选 Nginx 版本，现有项目保持不变。")
     else:
+        if not requested:
+            requested = server_release_version(kind)
         require(isinstance(requested, str) and re.fullmatch(r"v\d+\.\d+\.\d+", requested), "请先确认具体稳定发行版本。")
     changes = []
     def change(field, value, label, concealed=False):
@@ -559,9 +561,10 @@ def deploy(params):
     if kind == "exchange" and plan["installed"] and action != "retry":
         require(params.get("maintenance_confirmed") is True, "请先在交易网页停止交易并确认撤单及清理完成，再调整部署条件。")
     if plan["requires_archive"]:
-        archive = TASK / "release.tar.gz"
-        require(archive.is_file(), "缺少已校验的目标版本安装包，未执行改动。")
-        require(hashlib.sha256(archive.read_bytes()).hexdigest() == params.get("release_sha256"), "目标版本安装包校验失败。")
+        prepare_deployment_archive(params, plan)
+        current = deployment_preflight(params | {"version": plan["version"]})
+        require(current["fingerprint"] == plan["fingerprint"], "下载期间项目配置发生变化，未执行安装。请重新预览。")
+    params = params | {"version": plan["version"]}
     if action == "install" and kind not in {"nginx", "reality"}:
         return _initial_deploy(params)
     step("备份原配置与必要数据，只调整变化的部署条件…", 15)

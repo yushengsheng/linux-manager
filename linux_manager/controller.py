@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import base64
 import json
 from pathlib import Path
 import subprocess
@@ -12,15 +11,14 @@ import secrets
 import threading
 
 from .models import Connection, ManagerError, Store, atomic_private, validate_password, validate_user
-from .transport import SSH, Askpass, ConnectionInterrupted, AuthenticationFailed
-from .releases import download_exchange
-from .official_packages import download_project
+from .transport import SSH, Askpass, ConnectionInterrupted, AuthenticationFailed, WaitingStopped
 from .project_info import credential_alias, information_rows, server_key
 from .vault import LocalVault, vault_alias
 
 
 class Controller:
     CONNECTION_ATTEMPTS = 4
+    SUBMISSION_DEADLINE = 90
 
     def __init__(self, store: Store):
         self.store = store
@@ -117,8 +115,8 @@ class Controller:
         data = self.transport(connection).call({"action":"details","service":service,"host":connection.host})
         return self._project_information(connection,service,data)
 
-    def deployment_preview(self, connection, params):
-        return self.transport(connection).call({"action":"deployment_preflight", "params":params})
+    def deployment_preview(self, connection, params, cancel_event=None):
+        return self.transport(connection).call({"action":"deployment_preflight", "params":params}, timeout=90, **({"cancel_event": cancel_event} if cancel_event is not None else {}))
 
     def uninstall_preview(self, connection, params):
         return self.retry_call(connection, {"action": "uninstall_preflight", "params": params})
@@ -186,17 +184,20 @@ class Controller:
             changes.update(password=params["new_password"], sudo_password=params["new_password"])
         return connection.changed(**changes)
 
-    def retry_call(self, connection, request, *, timeout=30, progress=lambda status: None, fallback=None, connected=lambda connection: None):
+    def retry_call(self, connection, request, *, timeout=30, progress=lambda status: None, fallback=None, connected=lambda connection: None, deadline=None, cancel_event=None):
         # Only safe reads and idempotent confirmation use this helper. Task
         # submission separately confirms the receipt before a repeat send.
         original = connection
         last = None
         for attempt in range(self.CONNECTION_ATTEMPTS):
+            remaining = deadline - time.monotonic() if deadline is not None else timeout
+            if remaining <= 0:
+                break
             ssh = self.transport(connection, fresh=True)
             if connection != original:
                 self.trust_same_server(self.transport(original), ssh)
             try:
-                data = ssh.call(request, timeout=timeout)
+                data = ssh.call(request, timeout=min(timeout, remaining), **({"cancel_event": cancel_event} if cancel_event is not None else {}))
                 connected(connection)
                 return data
             except AuthenticationFailed:
@@ -206,8 +207,8 @@ class Controller:
             except ConnectionInterrupted as error:
                 last = error
             if attempt + 1 < self.CONNECTION_ATTEMPTS:
-                progress({"task_id": request.get("task_id"), "state": "running", "progress": 0, "message": "连接暂时中断，正在重新连接并读取原任务；不会重复执行。"})
-                time.sleep(2)
+                progress({"task_id": request.get("task_id"), "state": "running", "progress": 0, "message": f"连接暂时中断，正在重新连接并读取原任务（{attempt + 2}/{self.CONNECTION_ATTEMPTS}）；不会重复执行。"})
+                self._wait(min(2, max(0, deadline - time.monotonic())) if deadline is not None else 2, cancel_event)
         raise ConnectionInterrupted("多次重连仍未取得有效结果。请重新连接后查看操作记录，不要重跑整个方案。" + (" " + str(last) if last else ""))
 
     def _task_fallback(self, connection, params):
@@ -217,25 +218,36 @@ class Controller:
         candidate = self.candidate(connection, params, preliminary)
         return candidate if candidate != connection else None
 
-    def _submit_task(self, connection, wire, identifier, params, progress, timeout):
+    def _wait(self, seconds, cancel_event=None):
+        if cancel_event is None:
+            time.sleep(seconds)
+        elif cancel_event.wait(seconds):
+            raise WaitingStopped("已停止本机等待。Linux 已收到的后台任务继续执行，请在操作记录中查看；勿重复安装。")
+
+    def _submit_task(self, connection, wire, identifier, params, progress, timeout, cancel_event=None):
         request = {"action": "start", "task_id": identifier, "params": wire}
+        deadline = time.monotonic() + self.SUBMISSION_DEADLINE
         for attempt in range(self.CONNECTION_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            progress({"task_id": identifier, "state": "submitting", "progress": 0, "message": f"正在提交任务（{attempt + 1}/{self.CONNECTION_ATTEMPTS}），提交与确认最多等待 {self.SUBMISSION_DEADLINE} 秒…"})
             try:
-                started = self.transport(connection, fresh=True).call(request, timeout=timeout)
+                started = self.transport(connection, fresh=True).call(request, timeout=min(timeout, 30, remaining), **({"cancel_event": cancel_event} if cancel_event is not None else {}))
                 if started.get("task_id") != identifier:
                     raise ManagerError("服务器返回的任务编号不一致，已停止；请查看操作记录，不要重复提交。")
                 return connection
             except ConnectionInterrupted:
-                progress({"task_id": identifier, "state": "running", "progress": 0, "message": "提交响应中断，正在确认原任务是否已收到；不会重跑已执行步骤。"})
+                progress({"task_id": identifier, "state": "running", "progress": 0, "message": "提交响应中断，正在查询原任务回执；最多等待 90 秒，不会重跑已执行步骤。"})
                 observed = []
-                found = self.retry_call(connection, {"action": "task_lookup", "task_id": identifier}, progress=progress, fallback=self._task_fallback(connection, params), connected=observed.append)
+                found = self.retry_call(connection, {"action": "task_lookup", "task_id": identifier}, timeout=15, progress=progress, fallback=self._task_fallback(connection, params), connected=observed.append, deadline=deadline, cancel_event=cancel_event)
                 if found.get("task") is not None:
                     task = found["task"]
                     if not isinstance(task, dict) or task.get("id") != identifier or task.get("operation") != params["operation"]:
                         raise ManagerError("服务器任务回执不一致，已停止；请查看操作记录。")
                     return observed[-1]
                 if attempt + 1 < self.CONNECTION_ATTEMPTS:
-                    time.sleep(2)
+                    self._wait(min(2, max(0, deadline - time.monotonic())), cancel_event)
         raise ConnectionInterrupted("提交未能确认，任务编号已保存在操作记录中；请重新连接检查，不要重跑整个方案。")
 
     def verify_task(self, connection: Connection, identifier: str, params: dict, status: dict, progress=lambda status: None) -> Connection:
@@ -262,7 +274,7 @@ class Controller:
             raise ManagerError("新连接或任务确认未完成。请勿重复提交；服务器只会恢复仍未确认的变更，已确认结果请在操作记录中核对。 " + str(error)) from None
         return candidate
 
-    def execute(self, connection: Connection, params: dict, progress=lambda status: None) -> tuple[dict, Connection]:
+    def execute(self, connection: Connection, params: dict, progress=lambda status: None, cancel_event=None) -> tuple[dict, Connection]:
         original = connection
         ssh = self.transport(connection, fresh=True)
         ssh.redactor.add(*(v for k, v in params.items() if isinstance(v, str) and any(x in k for x in ["password", "username", "key", "host"])))
@@ -283,11 +295,11 @@ class Controller:
                 # watcher must not reconnect with an obsolete account/key.
                 self.disconnect_connection(connection.identifier)
             self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": "submission_unknown", "created": created, "message": "正在提交；尚未确认服务器是否收到，勿重复执行。"})
-            poll_connection = self._submit_task(connection, wire, identifier, params, progress, timeout)
+            poll_connection = self._submit_task(connection, wire, identifier, params, progress, timeout, **({"cancel_event": cancel_event} if cancel_event is not None else {}))
         deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "reality", "xui", "nginx"}
         pending_values = None
         if deployment:
-            preflight = self.retry_call(connection, {"action": "deployment_preflight", "params": wire}, progress=progress)
+            preflight = self.retry_call(connection, {"action": "deployment_preflight", "params": wire}, progress=progress, cancel_event=cancel_event)
             if params.get("deployment_fingerprint") and params["deployment_fingerprint"] != preflight["fingerprint"]:
                 raise ManagerError("项目配置在预览后发生变化，未执行改动。请重新预览。")
             kind = params["service"]
@@ -299,16 +311,8 @@ class Controller:
                 # panel password before the server change has been verified.
                 self.store.vault.put(vault_alias("service-pending", credential_alias(connection, kind)), pending_values)
             if preflight["requires_archive"]:
-                progress({"state": "preparing", "progress": 5, "message": "在本机下载并校验已确认版本的官方发行包…"})
-                with tempfile.TemporaryDirectory(prefix="lm-release-", dir=self.store.directory) as directory:
-                    archive = Path(directory) / "release.tar.gz"
-                    wire["release_sha256"] = download_exchange(preflight["version"], archive) if kind == "exchange" else download_project(kind, preflight["version"], preflight["architecture"], archive)
-                    wire["release_archive"] = base64.b64encode(archive.read_bytes()).decode()
-                    progress({"state": "preparing", "progress": 10, "message": "通过 SSH 传送已校验的发行包…"})
-                    submit(timeout=180)
-                wire.pop("release_archive", None)
-            else:
-                submit()
+                progress({"state": "preparing", "progress": 0, "message": "提交安装任务，Linux 将直接下载并校验官方发行包…"})
+            submit()
         else:
             if params["operation"] == "uninstall":
                 preflight = self.uninstall_preview(connection, wire)
@@ -339,11 +343,11 @@ class Controller:
             nonlocal poll_connection
             poll_connection = current
         for _ in range(1200):
-            status = self.retry_call(poll_connection, {"action": "task", "task_id": identifier}, progress=progress, fallback=fallback if fallback != poll_connection else None, connected=observed)
+            status = self.retry_call(poll_connection, {"action": "task", "task_id": identifier}, progress=progress, fallback=fallback if fallback != poll_connection else None, connected=observed, cancel_event=cancel_event)
             progress(status)
             if status["state"] in {"succeeded", "failed", "rolled_back", "awaiting_verification", "recovery_failed"}:
                 break
-            time.sleep(2)
+            self._wait(2, cancel_event)
         else:
             raise ManagerError("任务仍未结束，请在操作记录中查看后台任务，勿重复执行。")
         if status["state"] == "awaiting_verification":

@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import io
 import json
@@ -191,8 +190,8 @@ class PublicExchangeReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ManagerError, "下载不完整"):
                 releases.download_asset(public_asset() | {"size": len(CONTENT), "_public_release": False}, VERSION, Path(folder) / "release.tar.gz")
 
-    def test_public_verified_package_enters_existing_ssh_transfer_flow(self):
-        with tempfile.TemporaryDirectory() as folder, mock.patch.object(releases.urllib.request, "urlopen", side_effect=payload_responses()):
+    def test_deployment_submits_small_parameters_without_local_download(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(releases.urllib.request, "urlopen", side_effect=AssertionError("Mac must not download")):
             connection = Connection(host="host.invalid", username="tester")
             store = mock.Mock(directory=Path(folder))
             store.profiles.return_value = [connection]
@@ -207,25 +206,9 @@ class PublicExchangeReleaseTests(unittest.TestCase):
             self.assertEqual(result, connection)
             self.assertEqual(len(sent), 1)
             self.assertEqual(sent[0]["version"], VERSION)
-            self.assertEqual(sent[0]["release_sha256"], DIGEST)
-            self.assertEqual(base64.b64decode(sent[0]["release_archive"]), CONTENT)
-            self.assertNotIn("release_archive", controller._submit_task.call_args.args[1])
-            self.assertFalse(any("api.github.com" in str(call) for call in controller.retry_call.call_args_list))
-
-    def test_download_verification_failure_never_submits_remote_task(self):
-        with tempfile.TemporaryDirectory() as folder, mock.patch.object(releases.urllib.request, "urlopen", side_effect=payload_responses(b"corrupt")):
-            store = mock.Mock(directory=Path(folder))
-            controller = Controller(store)
-            controller.transport = mock.Mock()
-            controller.retry_call = mock.Mock(return_value={"version": VERSION, "fingerprint": "preview", "requires_archive": True, "installed": False, "architecture": "x86_64"})
-            controller._submit_task = mock.Mock()
-            connection = Connection(host="host.invalid", username="tester")
-            with self.assertRaisesRegex(ManagerError, "SHA-256 校验失败"):
-                controller.execute(connection, {"operation": "deploy", "service": "exchange", "version": VERSION, "deployment_fingerprint": "preview"})
-            controller._submit_task.assert_not_called()
-            store.record.assert_not_called()
-            store.save.assert_not_called()
-            controller.transport.return_value.call.assert_not_called()
+            self.assertNotIn("release_sha256", sent[0])
+            self.assertNotIn("release_archive", sent[0])
+            self.assertLess(len(json.dumps(sent[0])), 1024)
 
 
 if __name__ == "__main__":

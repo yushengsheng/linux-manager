@@ -121,7 +121,7 @@ class BackupAndControllerTests(unittest.TestCase):
 
     def test_configuration_change_does_not_download_or_upload_an_archive(self):
         params = self.response("exchange")
-        with mock.patch("linux_manager.controller.download_exchange") as download:
+        with mock.patch("linux_manager.releases.download_exchange") as download:
             result, _ = self.controller.execute(self.connection, params)
         self.assertEqual(result["state"], "succeeded"); download.assert_not_called()
         sent = self.ssh.call.call_args_list[1].args[0]["params"]

@@ -331,11 +331,21 @@ def task_list():
 
 
 @contextlib.contextmanager
-def state_lock(folder):
+def state_lock(folder, timeout=None):
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (folder / "state.lock").open("a") as stream:
         os.chmod(folder / "state.lock", 0o600)
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    require(time.monotonic() < deadline, "任务提交仍在处理中，请稍后到操作记录查看原任务；不会重复执行。")
+                    time.sleep(0.1)
         yield
 
 
@@ -344,7 +354,7 @@ def start_task(params, identifier=None):
     require(action in JOB_ACTIONS, "不支持此操作。")
     if identifier is not None:
         validate_task_id(identifier)
-    with state_lock(ROOT / "submission"):
+    with state_lock(ROOT / "submission", timeout=5):
         return submit_task(params, identifier)
 
 
@@ -372,20 +382,9 @@ def submit_task(params, identifier=None):
     key = secrets.token_hex(32)
     receipt = {"key": key, "digest": submission_digest(params, key)}
     params = dict(params)
-    archive = params.pop("release_archive", None)
-    content = None
-    if action == "deploy" and archive is not None:
-        require(isinstance(params.get("version"), str) and re.fullmatch(r"v\d+\.\d+\.\d+", params["version"]), "请先确认具体发行版本。")
-        require(isinstance(archive, str) and len(archive) <= 140 * 1024 * 1024, "请从本地程序传送已校验的发行包。")
-        try:
-            content = base64.b64decode(archive, validate=True)
-        except (ValueError, TypeError):
-            raise OperationError("发行包传送格式无效。") from None
-        require(0 < len(content) <= 100 * 1024 * 1024 and hashlib.sha256(content).hexdigest() == params.get("release_sha256"), "发行包传送校验失败，未提交安装。")
+    require("release_archive" not in params, "安装包改由 Linux 直接下载，请更新本机管理程序后重试。")
     directory.mkdir(mode=0o700)
     write_json(directory / "submission.json", receipt)
-    if content is not None:
-        private_write(directory / "release.tar.gz", content)
     write_json(directory / "request.json", params)
     write_json(directory / "status.json", {"id": identifier, "operation": action, "state": "queued", "progress": 0, "created": now(), "updated": now(), "message": "任务已提交，等待执行。", "events": []})
     private_write(directory / "runner.py", globals().get("AGENT_SOURCE", Path(__file__).read_text() if "__file__" in globals() else ""))
@@ -1500,9 +1499,9 @@ def project_archive(params, repository, version, name, destination):
     archive = TASK / "release.tar.gz"
     if archive.is_file():
         with archive.open("rb") as stream:
-            require(hashlib.file_digest(stream, "sha256").hexdigest() == params.get("release_sha256"), "传送的安装包校验失败，未执行安装。")
+            require(hashlib.file_digest(stream, "sha256").hexdigest() == params.get("release_sha256"), "Linux 下载的安装包校验失败，未执行安装。")
         return archive
-    return download_verified(repository, version, name, destination)
+    raise OperationError("缺少 Linux 下载并校验的发行包，未执行安装。")
 
 
 def verify_local_https(address, number, path="/", certificate_data=None):
@@ -1528,7 +1527,7 @@ def deploy_hysteria(params):
     version = params.get("version", "v1.14.2")
     architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(architecture is not None, "当前服务器架构尚未支持自动安装。")
-    step("下载并验证 Hysteria2 服务内核…", 35)
+    step("读取已校验的 Hysteria2 服务内核…", 35)
     name = "sing-box-" + version[1:] + "-linux-" + architecture + ".tar.gz"
     package = project_archive(params, "SagerNet/sing-box", version, name, TASK / "sing-box.tar.gz")
     unpack(package, TASK / "unpacked")
@@ -1562,7 +1561,7 @@ def deploy_xui(params):
     version = params.get("version", "v3.9.0")
     architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(architecture is not None, "当前服务器架构尚未支持自动安装。")
-    step("下载并校验代理管理面板…", 35)
+    step("读取已校验的代理管理面板…", 35)
     package = project_archive(params, "MHSanaei/3x-ui", version, "x-ui-linux-" + architecture + ".tar.gz", TASK / "x-ui.tar.gz")
     unpack(package, TASK / "unpacked")
     candidates = [p for p in (TASK / "unpacked").rglob("x-ui") if p.is_file()]
@@ -1602,16 +1601,16 @@ def deploy_xui(params):
 
 def deploy_exchange(params):
     version = params.get("version", "")
-    require(isinstance(version, str) and re.fullmatch(r"v\d+\.\d+\.\d+", version), "请先在本地确认具体发行版本，再提交部署。")
+    require(isinstance(version, str) and re.fullmatch(r"v\d+\.\d+\.\d+", version), "请先确认具体发行版本，再提交部署。")
     address = host(params.get("host")); number = port(params.get("port", 26483)); backend = port(params.get("backend_port", 18880))
     require(platform.machine() == "x86_64", "小军交易系统首次安装仅支持 x86_64。")
     retry = exchange_retry_allowed(params)
     require(not any(Path(p).exists() for p in ["/opt/xiaojun-exchange", "/etc/xiaojun-exchange", "/var/lib/xiaojun-exchange"]) or retry, "检测到已有交易系统，已保留配置和数据。首次安装不能用于升级。")
     require(number != backend, "面板端口和内部端口不能相同。")
     ensure_port_available(number); ensure_port_available(backend)
-    step("再次校验已传送的小军交易系统发行包…", 15)
+    step("再次校验 Linux 下载的小军交易系统发行包…", 15)
     archive = TASK / "release.tar.gz"
-    require(archive.is_file(), "没有找到本机传送的发行包。")
+    require(archive.is_file(), "没有找到 Linux 下载的发行包。")
     with archive.open("rb") as stream:
         require(hashlib.file_digest(stream, "sha256").hexdigest() == params.get("release_sha256"), "发行包校验失败，文件未被执行。")
     source = TASK / "exchange-source"
@@ -1889,7 +1888,7 @@ def dispatch(request):
         return start_task(request.get("params", {}), request.get("task_id"))
     if operation == "task_lookup":
         identifier = validate_task_id(request.get("task_id"))
-        with state_lock(ROOT / "submission"):
+        with state_lock(ROOT / "submission", timeout=5):
             directory = ROOT / "tasks" / identifier
             if not directory.exists():
                 return {"task": None}
@@ -1925,6 +1924,35 @@ def rpc():
     except Exception as error:
         result = {"ok": False, "message": clean(error) if isinstance(error, OperationError) else "服务器检查失败，请确认系统和管理员权限。"}
     print("LM_RESULT:" + json.dumps(result, ensure_ascii=False))
+
+
+#LM_BUNDLED_SERVER_DOWNLOADS#
+_downloads = {"__name__": "linux_manager_server_downloads"}
+if globals().get("LM_SERVER_DOWNLOADS_SOURCE"):
+    exec(compile(LM_SERVER_DOWNLOADS_SOURCE, "<linux-manager-downloads>", "exec"), _downloads)
+elif "__file__" in globals() and Path(__file__).with_name("server_downloads.py").is_file():
+    exec(compile(Path(__file__).with_name("server_downloads.py").read_text(), "<linux-manager-downloads>", "exec"), _downloads)
+
+
+def server_release_version(service, version=None):
+    try:
+        return _downloads["release_info"](service, version)["tag_name"]
+    except _downloads["DownloadError"] as error:
+        raise OperationError(str(error)) from None
+
+
+def prepare_deployment_archive(params, plan):
+    step("Linux 正在查询官方安装包与 SHA-256 校验信息…", 3)
+    def progress(count, size):
+        text = f"Linux 正在直接下载官方安装包：{count / 1024 / 1024:.1f} MiB"
+        if size:
+            text += f" / {size / 1024 / 1024:.1f} MiB"
+        step(text, 5 + min(7, count * 7 / size) if size else 5)
+    try:
+        params["release_sha256"] = _downloads["download_release"](plan["service"], plan["version"], plan["architecture"], TASK / "release.tar.gz", progress)
+    except _downloads["DownloadError"] as error:
+        raise OperationError(str(error)) from None
+    step("Linux 下载完成，SHA-256 校验通过，开始安装…", 13)
 
 
 #LM_BUNDLED_REALITY#

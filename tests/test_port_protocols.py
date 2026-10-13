@@ -162,7 +162,7 @@ class PortProtocolUITests(unittest.TestCase):
         app.controller = mock.Mock()
         app.controller.deployment_preview.return_value = {"version": "v1.2.3", "fingerprint": "fixture", "action": "reconfigure", "installed": True, "changes": []}
         app._execute = mock.Mock()
-        app._run = mock.Mock(side_effect=lambda work, done, message: done(work()))
+        app._run = mock.Mock(side_effect=lambda work, done, message, **kwargs: done(work()))
         for service, protocol in SERVICE_PROTOCOLS.items():
             app._preview_deployment({"service": service, "port": 12345, "backend_port": 18880})
             text = app._execute.call_args.args[1]

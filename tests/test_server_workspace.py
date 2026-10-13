@@ -4,6 +4,8 @@ import secrets
 import sys
 from pathlib import Path
 import tempfile
+import threading
+import time
 import tkinter as tk
 from tkinter import font, ttk
 import unittest
@@ -14,6 +16,7 @@ from linux_manager.gui import App, NAVIGATION
 from linux_manager.models import Connection, SERVICES, Store
 from linux_manager.project_info import server_key
 from linux_manager.releases import KEEP_CURRENT
+from linux_manager.transport import WaitingStopped
 
 
 class ServerWorkspaceTests(unittest.TestCase):
@@ -59,6 +62,37 @@ class ServerWorkspaceTests(unittest.TestCase):
             "automatic_updates": False, "tasks": [],
             "project_information": {installed: {"data": {"installed": True, "version": "v3.9.0", "port": 2053}, "rows": [("项目状态", "已安装")]}},
         }
+
+    def test_stop_waiting_releases_inputs_and_allows_another_operation(self):
+        app = self.app
+        cancel = threading.Event()
+        finished = threading.Event()
+        available = [button for button in app.buttons if str(button.cget("state")) == "normal"]
+        def stalled():
+            cancel.wait(10)
+            finished.set()
+            raise WaitingStopped("已停止本机等待，Linux 后台任务继续执行。")
+        with mock.patch("linux_manager.gui.messagebox.showerror") as error:
+            app._run(stalled, wait_cancel=cancel)
+            self.assertTrue(app.busy)
+            self.assertEqual(str(app.stop_waiting_button.cget("state")), "normal")
+            self.assertTrue(any(str(button.cget("state")) == "disabled" for button in app.buttons))
+            app.stop_waiting_button.invoke()
+            self.assertTrue(finished.wait(1))
+            deadline = time.monotonic() + 2
+            while app.busy and time.monotonic() < deadline:
+                app.update(); time.sleep(0.01)
+            self.assertFalse(app.busy)
+            self.assertEqual(str(app.stop_waiting_button.cget("state")), "disabled")
+            self.assertTrue(all(str(button.cget("state")) == "normal" for button in available))
+            self.assertEqual(app.input_states, [])
+            error.assert_not_called()
+            self.assertIn("Linux 后台任务", app.status.cget("text"))
+            app._run(lambda: "next operation", lambda result: app.status.configure(text=result))
+            deadline = time.monotonic() + 2
+            while app.busy and time.monotonic() < deadline:
+                app.update(); time.sleep(0.01)
+            self.assertEqual(app.status.cget("text"), "next operation")
 
     def test_all_existing_pages_remain_accessible_through_navigation(self):
         app = self.app

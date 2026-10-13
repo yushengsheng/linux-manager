@@ -1,4 +1,3 @@
-import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -65,9 +64,8 @@ class SubmissionReceiptTests(unittest.TestCase):
         self.assertEqual(ids, [self.identifier] * 3)
         self.command.assert_called_once()
 
-    def test_archive_replay_is_verified_without_creating_another_job(self):
-        content = b"fixture-release"
-        params = {"operation": "deploy", "version": "v1.1.99", "release_archive": base64.b64encode(content).decode(), "release_sha256": REMOTE.hashlib.sha256(content).hexdigest()}
+    def test_remote_download_submission_replay_starts_one_job(self):
+        params = {"operation": "deploy", "version": "v1.1.99"}
         REMOTE.start_task(params, self.identifier)
         REMOTE.start_task(params, self.identifier)
         self.command.assert_called_once()

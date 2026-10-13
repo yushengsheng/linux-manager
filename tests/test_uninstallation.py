@@ -514,7 +514,7 @@ class UninstallControllerAndUITests(unittest.TestCase):
         self.ssh.call.side_effect = [self.plan, {"task_id": identifier}, {"id": identifier, "state": "succeeded", "message": "fixture-uninstalled", "result": {"data_retained": True}}]
         alias = credential_alias(self.connection, "exchange"); values = {"fixture-secret": secrets.token_urlsafe(30)}
         self.vault.put(alias, values)
-        with mock.patch("linux_manager.controller.secrets.token_hex", return_value=identifier), mock.patch("linux_manager.controller.download_exchange") as download:
+        with mock.patch("linux_manager.controller.secrets.token_hex", return_value=identifier), mock.patch("linux_manager.releases.download_exchange") as download:
             status, updated = self.controller.execute(self.connection, self.params())
         self.assertEqual(status["state"], "succeeded"); self.assertEqual(updated, self.connection)
         download.assert_not_called(); self.assertEqual(self.vault.get(alias), values)

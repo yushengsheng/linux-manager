@@ -25,8 +25,8 @@ from .help_texts import HELP
 from .widgets import HelpAction, ScrollPage, install_check_style, sync_tree
 from .key_info import encrypted_key
 from .project_info import server_key, credential_alias, SERVICE_PROTOCOLS, deployment_network_hint
-from .official_packages import official_version
 from .qr import is_node_link, qr_png
+from .transport import WaitingStopped
 
 BASE = Path(__file__).resolve().parents[1]
 BG = "#f4f6fa"
@@ -310,6 +310,10 @@ class App(tk.Tk):
         self.status.pack(side="left", fill="x", expand=True)
         self.progress = ttk.Progressbar(footer, length=200, maximum=100)
         self.progress.pack(side="right", padx=(15, 0))
+        stop = self._button(footer, "停止等待", self._stop_waiting, track=False)
+        stop.pack(side="right", padx=(10, 0))
+        self.stop_waiting_button = stop.button
+        self.stop_waiting_button.configure(state="disabled")
 
     def _navigate(self, _=None):
         selection = self.navigation_tree.selection()
@@ -1175,10 +1179,20 @@ class App(tk.Tk):
                 collect(widget)
         collect(self)
 
-    def _run(self, worker, callback=None, message="正在检查…"):
+    def _stop_waiting(self):
+        cancel = self.__dict__.get("wait_cancel")
+        if cancel is not None:
+            cancel.set()
+            self.stop_waiting_button.configure(state="disabled")
+            self.status.configure(text="正在停止本机等待；已提交的 Linux 后台任务继续执行…")
+
+    def _run(self, worker, callback=None, message="正在检查…", wait_cancel=None):
         if self.busy:
             return
         self.busy = True
+        self.wait_cancel = wait_cancel
+        if self.__dict__.get("stop_waiting_button"):
+            self.stop_waiting_button.configure(state="normal" if wait_cancel is not None else "disabled")
         for button in self.buttons:
             button.configure(state="disabled")
         self.input_states = []
@@ -1209,7 +1223,7 @@ class App(tk.Tk):
                     text = str(error)
                 else:
                     text = "操作未完成。已保留记录，请检查连接或查看任务状态。"
-                self.events.put(("error", text, None))
+                self.events.put(("stopped" if isinstance(error, WaitingStopped) else "error", text, None))
         threading.Thread(target=work, daemon=True).start()
 
     def _drain(self):
@@ -1230,6 +1244,9 @@ class App(tk.Tk):
                 if latest_progress is not None:
                     show_progress(latest_progress); latest_progress = None
                 self.busy = False
+                self.wait_cancel = None
+                if self.__dict__.get("stop_waiting_button"):
+                    self.stop_waiting_button.configure(state="disabled")
                 for button in self.buttons:
                     button.configure(state="normal")
                 for widget, state in self.input_states:
@@ -1237,7 +1254,9 @@ class App(tk.Tk):
                         widget.configure(state=state)
                 self.input_states = []
                 self._auth_fields()
-                if kind == "error":
+                if kind == "stopped":
+                    self.status.configure(text=value)
+                elif kind == "error":
                     self.status.configure(text=value)
                     messagebox.showerror("操作未完成", value, parent=self)
                 elif callback:
@@ -1572,6 +1591,7 @@ class App(tk.Tk):
         if not self._ready(): return
         if not messagebox.askyesno("确认本次操作", description + "\n\n仅执行本次所列改动。是否开始？", parent=self): return
         c = self.current
+        wait_cancel = threading.Event() if params["operation"] == "deploy" else None
         def progress(status):
             self.events.put(("progress", status, None))
         def done(data):
@@ -1610,12 +1630,12 @@ class App(tk.Tk):
                 phrase = secrets.token_urlsafe(36)
                 key, public = self.controller.generate_key(c, phrase)
                 params.update(local_key_path=key, local_key_passphrase=phrase, public_key=public)
-            result = self.controller.execute(c, params, progress)
+            result = self.controller.execute(c, params, progress, **({"cancel_event": wait_cancel} if wait_cancel is not None else {}))
             updated = result[1]
             if updated.key_path:
                 result[0]["local_key_encryption"] = {updated.key_path: encrypted_key(updated.key_path)}
             return result
-        self._run(work, done, "提交后台任务…")
+        self._run(work, done, "提交后台任务…", wait_cancel=wait_cancel)
 
     def _account_operation(self, operation):
         if not self._ready(): return
@@ -1811,21 +1831,15 @@ class App(tk.Tk):
             existing = bool(self._deployment_current(key))
             if key == "hysteria2": params["proxy_password"] = validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else ""
             if key == "xui": params.update(panel_username=validate_user(self.deploy_username.get()), panel_password=validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else "")
-            if key != "nginx" and self.version_mode.get() != KEEP_CURRENT:
-                requested = None if self.version_mode.get() == LATEST_STABLE else params["version"]
-                def resolved(version):
-                    # Submit only the exact version displayed in the confirmation.
-                    params["version"] = version
-                    self.deploy_version.set(version)
-                    self._preview_deployment(params)
-                self._run(lambda: exchange_version(requested) if key == "exchange" else official_version(key, requested), resolved, "正在获取 GitHub 官方发行版本…")
-            else:
-                self._preview_deployment(params)
+            if key != "nginx" and self.version_mode.get() == LATEST_STABLE:
+                params.pop("version", None)
+            self._preview_deployment(params)
         except ManagerError as error:
             messagebox.showerror("检查输入", str(error), parent=self)
 
     def _preview_deployment(self, params):
         c = self.current
+        wait_cancel = threading.Event()
         def done(plan):
             params["version"] = plan["version"]
             params["deployment_fingerprint"] = plan["fingerprint"]
@@ -1840,7 +1854,7 @@ class App(tk.Tk):
                 params["maintenance_confirmed"] = True
             lines.append(deployment_network_hint(params["service"], params["port"], params.get("backend_port")))
             self._execute(params, "\n".join(lines))
-        self._run(lambda:self.controller.deployment_preview(c, params), done, "比对现有项目与填写的新部署条件…")
+        self._run(lambda:self.controller.deployment_preview(c, params, cancel_event=wait_cancel), done, "Linux 正在查询官方版本并比对部署条件…", wait_cancel=wait_cancel)
 
     def _details(self):
         if not self._ready(): return

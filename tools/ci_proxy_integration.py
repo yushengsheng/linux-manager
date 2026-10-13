@@ -1,5 +1,4 @@
 """Real HY2/REALITY traffic acceptance on disposable GitHub Actions runners."""
-import base64
 import contextlib
 import http.server
 import importlib.util
@@ -13,14 +12,17 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.parse
 from unittest import mock
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
-from linux_manager.official_packages import download_project, official_version
 from linux_manager.project_info import node_links
 from linux_manager.qr import qr_png
+from linux_manager.controller import Controller
+from linux_manager.models import Connection, Store
+from linux_manager.transport import ConnectionInterrupted, WaitingStopped
 
 
 def check(condition, message):
@@ -37,25 +39,16 @@ def main():
     spec=importlib.util.spec_from_file_location('proxy_ci_remote',BASE/'linux_manager/remote_agent.py')
     remote=importlib.util.module_from_spec(spec);spec.loader.exec_module(remote)
     source=(BASE/'linux_manager/remote_agent.py').read_text()
-    for name in ['reality','redeployment','uninstallation']:
+    for name in ['server_downloads','reality','redeployment','uninstallation']:
         source=source.replace('#LM_BUNDLED_'+name.upper()+'#','LM_'+name.upper()+'_SOURCE = '+repr((BASE/'linux_manager'/ (name+'.py')).read_text()))
     source=source.replace('#LM_BUNDLED_CERTBOT#','CERTBOT_LOCK = '+repr((BASE/'linux_manager/resources/requirements-certbot.lock').read_text()))
     remote.AGENT_SOURCE=source
     remote.ROOT.mkdir(parents=True,mode=0o700)
-    archives={}
-    def archive(service,version):
-        key=(service,version)
-        if key not in archives:
-            path=artifacts/(service+'-'+version+'.archive')
-            digest=download_project(service,version,remote.platform.machine(),path)
-            archives[key]={'release_sha256':digest,'release_archive':base64.b64encode(path.read_bytes()).decode()}
-        return archives[key]
     def submit(params):
         identifier=secrets.token_hex(12)
         if params['operation']=='deploy':
             plan=remote.deployment_preflight(params)
             params=params|{'version':plan['version'],'deployment_fingerprint':plan['fingerprint']}
-            if plan['requires_archive']:params=params|archive(params['service'],plan['version'])
         elif params['operation']=='uninstall':
             params=params|{'uninstall_fingerprint':remote.uninstall_preflight(params)['fingerprint']}
         remote.start_task(params,identifier)
@@ -110,10 +103,62 @@ def main():
                 check(result.returncode==0 and result.stdout==b'linux-manager-proxy-ok', service+' actual SOCKS to proxy to HTTP traffic succeeded')
             finally:
                 client.terminate();client.wait(timeout=10)
-    xray_version=official_version('reality');hy2_version=official_version('hysteria2')
+    xray_version=remote.server_release_version('reality');hy2_version=remote.server_release_version('hysteria2')
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(artifacts/'hy2.key'),'-out',str(artifacts/'hy2.crt'),'-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'],check=True,capture_output=True)
     hy2={'operation':'deploy','service':'hysteria2','host':'127.0.0.1','port':51752,'version':hy2_version,'proxy_password':secrets.token_urlsafe(30),'tls_cert':(artifacts/'hy2.crt').read_text(),'tls_key':(artifacts/'hy2.key').read_text()}
-    submit(hy2);traffic('hysteria2')
+    # Exercise the real desktop SSH path with a lost submission reply, then
+    # stop the local observer and verify that Linux completes the same job.
+    remote.apt(['openssh-server'])
+    key = artifacts / 'ci-ssh-key'
+    subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(key)],check=True)
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1',0)); ssh_port = listener.getsockname()[1]
+    Path('/run/sshd').mkdir(exist_ok=True)
+    ssh_config = artifacts / 'sshd-config'
+    ssh_config.write_text(f'Port {ssh_port}\nListenAddress 127.0.0.1\nHostKey /etc/ssh/ssh_host_ed25519_key\nAuthorizedKeysFile {key}.pub\nStrictModes no\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nUsePAM no\nPidFile {artifacts}/sshd.pid\n')
+    daemon = subprocess.Popen(['/usr/sbin/sshd','-D','-e','-f',str(ssh_config)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(40):
+            try:
+                with socket.create_connection(('127.0.0.1',ssh_port),timeout=1):break
+            except OSError:time.sleep(.1)
+        values = {}
+        vault = types.SimpleNamespace(get=lambda alias: dict(values.get(alias,{})), put=lambda alias,data: values.__setitem__(alias,dict(data)),delete=lambda alias: values.pop(alias,None))
+        controller = Controller(Store(artifacts/'local-observer',vault))
+        connection = Connection(host='127.0.0.1',port=ssh_port,username='root',auth='key',key_path=str(key),remember=False)
+        ssh = controller.transport(connection);_,host_keys = ssh.fingerprint();ssh.trust(host_keys)
+        cancel = threading.Event(); starts = []
+        transport = controller.transport
+        def lossy_transport(c, fresh=False):
+            ssh = transport(c, fresh=fresh); call = ssh.call
+            def interrupted(request, **options):
+                data = call(request, **options)
+                if request['action']=='start':
+                    starts.append(request['task_id'])
+                    check('release_archive' not in request['params'] and len(json.dumps(request['params'])) < 10000,'HY2 submitted without an archive through real SSH')
+                    raise ConnectionInterrupted('injected lost submission reply')
+                return data
+            ssh.call = interrupted
+            return ssh
+        controller.transport = lossy_transport
+        def observe(status):
+            if status.get('state') == 'queued':cancel.set()
+        try:
+            controller.execute(connection,hy2,observe,cancel_event=cancel)
+            raise RuntimeError('Local observer was not stopped')
+        except WaitingStopped:
+            check(len(starts)==1,'lost submission response reconciles original task without resubmission')
+        identifier = starts[0]
+        for _ in range(300):
+            status = remote.status_task(identifier)
+            if status['state'] not in {'queued','running'}:break
+            time.sleep(1)
+        check(status['state']=='succeeded','Linux HY2 installation completes after local waiting stops: '+status['message'])
+        check(any('Linux' in event['message'] and '下载' in event['message'] for event in status['events']),'Linux download progress recorded in task history')
+        check(transport(connection).call({'action':'task','task_id':identifier})['state']=='succeeded','new SSH connection reads completed original HY2 task')
+    finally:
+        daemon.terminate();daemon.wait(timeout=10)
+    traffic('hysteria2')
     hy2_config=Path('/etc/sing-box/config.json').read_bytes()
     params={'operation':'deploy','service':'reality','host':'127.0.0.1','port':443,'version':xray_version}
     submit(params);traffic('reality');original=identity(details('reality'))
@@ -148,8 +193,18 @@ def main():
     check(Path(remote.REALITY_CONFIG).read_bytes()==before,'uninstall retains node configuration')
     submit(params);traffic('reality');check(identity(details('reality'))==original,'reinstall retains credentials')
     traffic('hysteria2')
+    panel_version = remote.server_release_version('xui')
+    panel = {'operation':'deploy','service':'xui','host':'127.0.0.1','port':2053,'version':panel_version,
+             'panel_username':'manager','panel_password':secrets.token_urlsafe(30),
+             'tls_cert':hy2['tls_cert'],'tls_key':hy2['tls_key']}
+    submit(panel)
+    panel_data = details('xui')
+    remote.verify_local_https('127.0.0.1',2053,panel_data['path'],certificate_data=hy2['tls_cert'])
+    verified = subprocess.run(['/usr/bin/python3','-c', "import bcrypt,sqlite3,sys; p=sys.stdin.read(); db=sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=ro',uri=True); h=db.execute('SELECT password FROM users WHERE username=?',('manager',)).fetchone()[0]; sys.exit(0 if bcrypt.checkpw(p.encode(),h.encode()) else 1)"],input=panel['panel_password'],text=True,capture_output=True,timeout=10)
+    check(verified.returncode == 0, 'Linux downloaded panel installs with verified HTTPS and login')
+    traffic('reality');traffic('hysteria2')
     origin.shutdown()
-    result={'passed':True,'architecture':remote.platform.machine(),'xray_version':xray_version,'hy2_version':hy2_version,'checks':['real-hy2-traffic','real-reality-traffic','qr-decode','idempotency','port-change','configuration-backup-restore','service-stop-start','downgrade-upgrade','rollback','uninstall-reinstall','coexistence']}
+    result={'passed':True,'architecture':remote.platform.machine(),'xray_version':xray_version,'hy2_version':hy2_version,'panel_version':panel_version,'checks':['linux-direct-download','panel-https-login','real-hy2-traffic','real-reality-traffic','qr-decode','idempotency','port-change','configuration-backup-restore','service-stop-start','downgrade-upgrade','rollback','uninstall-reinstall','coexistence']}
     (artifacts/'result.json').write_text(json.dumps(result,indent=2))
     (artifacts/'result.json').chmod(0o644)
     artifacts.chmod(0o755)

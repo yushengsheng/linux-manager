@@ -88,8 +88,8 @@ class DeploymentFieldsTests(unittest.TestCase):
         app._ready = mock.Mock(return_value=True)
         app._execute = mock.Mock()
         app.controller = mock.Mock()
-        app.controller.deployment_preview.side_effect = lambda c, params: {"version":params["version"],"fingerprint":"fictional-preview","changes":[],"installed":False,"action":"install"}
-        app._run = mock.Mock(side_effect=lambda worker, callback, message: callback(worker()))
+        app.controller.deployment_preview.side_effect = lambda c, params, **kwargs: {"version":params.get("version", "v1.1.85"),"fingerprint":"fictional-preview","changes":[],"installed":False,"action":"install"}
+        app._run = mock.Mock(side_effect=lambda worker, callback, message, **kwargs: callback(worker()))
         return app
 
     def test_exchange_uses_existing_defaults_without_proxy_credentials(self):
@@ -107,8 +107,7 @@ class DeploymentFieldsTests(unittest.TestCase):
         app.deploy_username.set("fixture")
         app.deploy_password.set("fictional-panel-password")
         app.deploy_backend.set("unused")
-        with mock.patch("linux_manager.gui.official_version", return_value="v3.9.0"):
-            app._deploy()
+        app._deploy()
         params = app._execute.call_args.args[0]
         self.assertEqual(params["panel_password"], "fictional-panel-password")
         self.assertEqual(params["panel_username"], "fixture")
@@ -118,8 +117,7 @@ class DeploymentFieldsTests(unittest.TestCase):
     def test_reality_only_submits_port_and_optional_target_without_password(self):
         app = self.prepare_deployment(); self.choose("reality")
         app.deploy_password.set("unused-hy2-password")
-        with mock.patch("linux_manager.gui.official_version", return_value="v26.3.27"):
-            app._deploy()
+        app._deploy()
         params = app._execute.call_args.args[0]
         self.assertEqual(params["service"], "reality")
         self.assertEqual(params["port"], 443)

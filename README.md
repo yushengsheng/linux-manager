@@ -1,18 +1,18 @@
 # linux服务器管理
 
-在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.11**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
+在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.12**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
 
 ## 下载与更新
 
-从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.11.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
+从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.12.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
 
 先正常退出旧程序再打开新版。沿用原本机档案、私钥及钥匙串，不需要重新添加服务器；新版可能需要再次允许访问钥匙串。本包使用临时签名，未经过 Apple 开发者公证：确认下载来源和校验值后，如系统拦截，按 macOS「隐私与安全性」的提示允许打开，不要关闭系统安全检查。
 
-更新说明见 [v0.3.11 发布说明](RELEASE_NOTES.md)。
+更新说明见 [v0.3.12 发布说明](RELEASE_NOTES.md)。
 
 ## 功能
 
-v0.3.11 新增独立 VLESS + REALITY + Vision 部署和 HY2 / VLESS 节点二维码，已通过 [GitHub 全新 Ubuntu 双架构实测](https://github.com/yushengsheng/linux-manager/actions/runs/38337178549)。保留已有 Nginx 与交易系统证书兼容修复；升级管理器不会自动修改服务器。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
+v0.3.12 将全部项目发行包改为 Linux 服务器直接下载并校验 SHA-256；安装时可点击“停止等待”释放界面，服务器后台继续运行。保留独立 REALITY、节点二维码及证书兼容功能。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
 
 - 左侧保存多台服务器与多账号档案；点击即可使用保存的登录信息连接，可用连接直接复用。
 - 单机工作区：概览、应用管理、账号、安全与操作记录；全部既有功能保留。
@@ -32,7 +32,7 @@ v0.3.11 新增独立 VLESS + REALITY + Vision 部署和 HY2 / VLESS 节点二维
 - 配置页、部署确认及项目信息明确标注 TCP / UDP；HY2 节点仅 UDP，面板节点按实际配置标注 TCP、UDP 或两者，证书验证 TCP 80 单独提示。
 - 各功能提供可点击的大白话说明。
 
-登录档案、SSH 私钥、口令及本机管理记录只保存在本机，不启用云同步或遥测。口令保存在 macOS 本机钥匙串。部署只向所选服务器发送运行必需的配置、公钥及公开软件包，私钥不会传到服务器。
+登录档案、SSH 私钥、口令及本机管理记录只保存在本机，不启用云同步或遥测。口令保存在 macOS 本机钥匙串。部署只向所选服务器发送运行必需的配置和公钥；软件包由 Linux 直接从官方来源下载，私钥不会传到服务器。
 
 详细用法见 [使用说明](linux服务器管理使用说明.md)，验证结果见 [测试记录](linux服务器管理测试记录.md)。自动部署支持 Ubuntu 24.04、Debian 12/13；交易系统支持 x86_64。云平台安全组需自行放行对应端口。
 

@@ -135,14 +135,13 @@ class PasswordButtonTests(unittest.TestCase):
         app = self.app
         app.current = Connection(host="fixture.invalid", username="owner")
         app._ready = mock.Mock(return_value=True); app._execute = mock.Mock()
-        app._run = mock.Mock(side_effect=lambda worker, done, message: done(worker()))
-        app.controller.deployment_preview.side_effect = lambda c, params: {"version": params["version"], "fingerprint": "fixture-preview", "changes": [], "installed": False, "action": "install"}
+        app._run = mock.Mock(side_effect=lambda worker, done, message, **kwargs: done(worker()))
+        app.controller.deployment_preview.side_effect = lambda c, params, **kwargs: {"version": params.get("version", "v1.1.85"), "fingerprint": "fixture-preview", "changes": [], "installed": False, "action": "install"}
         for kind, field in [("hysteria2", "proxy_password"), ("xui", "panel_password")]:
             app.deploy_choice.set(SERVICES[kind][0]); app._deploy_defaults()
             app._generate_password(app.deploy_password)
             value = app.deploy_password.get()
-            with mock.patch("linux_manager.gui.official_version", return_value="v1.99.0"):
-                app._deploy()
+            app._deploy()
             self.assertEqual(app._execute.call_args.args[0][field], value)
             self.assert_password(value)
 
@@ -292,7 +291,7 @@ class PasswordPersistenceTests(unittest.TestCase):
         app.task_tree = mock.Mock(); app.task_tree.selection.return_value = [self.identifier]
         app.latest_tasks = [self.success]
         app.controller = mock.Mock(); app._secret_dialog = mock.Mock()
-        app._run = mock.Mock(side_effect=lambda worker, done, message: done(worker()))
+        app._run = mock.Mock(side_effect=lambda worker, done, message, **kwargs: done(worker()))
         app._task_password()
         self.assertEqual(app._secret_dialog.call_args.args[1], self.password)
         self.assertIn("核对任务结果", app._secret_dialog.call_args.args[0])
@@ -305,7 +304,7 @@ class PasswordPersistenceTests(unittest.TestCase):
         app.task_tree = mock.Mock(); app.task_tree.selection.return_value = [self.identifier]
         app.latest_tasks = [self.success]
         app._secret_dialog = mock.Mock()
-        app._run = mock.Mock(side_effect=lambda worker, done, message: done(worker()))
+        app._run = mock.Mock(side_effect=lambda worker, done, message, **kwargs: done(worker()))
         with mock.patch("linux_manager.gui.messagebox.showinfo") as info, mock.patch("linux_manager.gui.secrets.token_urlsafe") as token:
             app._task_password()
             app.current = self.connection
@@ -321,7 +320,7 @@ class PasswordPersistenceTests(unittest.TestCase):
         app.busy = False; app.current = self.connection; app.controller = self.controller
         app.task_tree = mock.Mock(); app.task_tree.selection.return_value = []
         app.status = mock.Mock(); app._show_tasks = mock.Mock()
-        app._run = mock.Mock(side_effect=lambda worker, done, message: done(worker()))
+        app._run = mock.Mock(side_effect=lambda worker, done, message, **kwargs: done(worker()))
         app._task_password()
         records = app._show_tasks.call_args.args[0]
         self.assertEqual(records[0]["id"], self.identifier)

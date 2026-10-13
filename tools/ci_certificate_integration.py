@@ -20,7 +20,6 @@ import urllib.request
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
-from linux_manager.releases import download_exchange
 
 
 def run(args, **kwargs):
@@ -104,10 +103,6 @@ def main():
             raise RuntimeError("Local ACME test CA did not start")
         Path("/usr/local/share/ca-certificates/linux-manager-ci-issued.crt").write_bytes(root)
         run(["update-ca-certificates"])
-        archive = artifacts / "exchange-release.tar.gz"
-        digest = download_exchange("v1.1.88", archive)
-        check(digest == "5507422fe74144b7c179db3d408dfe660726776927acd36ea6ab0a55d1826370", "official exchange release SHA-256 verified")
-
         nginx_params = {"service": "nginx", "host": args.address, "port": args.web_port}
         def deploy_nginx():
             task(remote)
@@ -117,11 +112,12 @@ def main():
 
         def deploy_exchange():
             task(remote)
-            shutil.copyfile(archive, remote.TASK / "release.tar.gz")
             params = {"service": "exchange", "version": "v1.1.88", "host": args.address,
-                      "port": 26483, "backend_port": 18880, "release_sha256": digest}
+                      "port": 26483, "backend_port": 18880}
             plan = remote.deployment_preflight(params)
-            remote.deploy(params | {"deployment_fingerprint": plan["fingerprint"]})
+            wire = params | {"deployment_fingerprint": plan["fingerprint"]}
+            remote.deploy(wire)
+            check(wire["release_sha256"] == "5507422fe74144b7c179db3d408dfe660726776927acd36ea6ab0a55d1826370", "Linux downloaded and verified the official exchange release")
 
         if args.order == "nginx-first":
             deploy_nginx()
