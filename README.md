@@ -12,7 +12,7 @@
 
 ## 功能
 
-v0.3.11 新增独立 VLESS + REALITY + Vision 部署和 HY2 / VLESS 节点二维码，已通过 [GitHub 全新 Ubuntu 双架构实测](https://github.com/yushengsheng/linux-manager/actions/runs/38336722599)。保留已有 Nginx 与交易系统证书兼容修复；升级管理器不会自动修改服务器。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
+v0.3.11 新增独立 VLESS + REALITY + Vision 部署和 HY2 / VLESS 节点二维码，已通过 [GitHub 全新 Ubuntu 双架构实测](https://github.com/yushengsheng/linux-manager/actions/runs/38337178549)。保留已有 Nginx 与交易系统证书兼容修复；升级管理器不会自动修改服务器。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
 
 - 左侧保存多台服务器与多账号档案；点击即可使用保存的登录信息连接，可用连接直接复用。
 - 单机工作区：概览、应用管理、账号、安全与操作记录；全部既有功能保留。
