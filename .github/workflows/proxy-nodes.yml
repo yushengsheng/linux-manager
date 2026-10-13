@@ -1,0 +1,55 @@
+name: Proxy nodes and QR
+
+on:
+  push:
+    branches: [main, 'codex/standalone-reality-qr*']
+    paths:
+      - 'linux_manager/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - 'tools/ci_proxy_integration.py'
+      - '.github/workflows/proxy-nodes.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare clean regression environment
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends python3-tk python3-venv xvfb xauth openssl
+          python3 -m venv /tmp/proxy-tests
+          /tmp/proxy-tests/bin/pip install -r requirements.txt pillow==11.3.0 zxing-cpp==2.3.0
+          sudo mkdir -p /private/tmp
+          sudo chmod 1777 /private/tmp
+      - name: Run all regressions including native UI and QR decoding
+        run: xvfb-run -a /tmp/proxy-tests/bin/python tools/run_tests.py
+
+  real-proxy:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare fresh server dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends python3-venv openssl ca-certificates curl iproute2
+          python3 -m venv /tmp/proxy-tests
+          /tmp/proxy-tests/bin/pip install -r requirements.txt pillow==11.3.0 zxing-cpp==2.3.0
+      - name: Verify real installs, traffic, changes, recovery and coexistence
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_TEMP /tmp/proxy-tests/bin/python tools/ci_proxy_integration.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxy-${{ matrix.runner }}
+          path: ${{ runner.temp }}/proxy-acceptance/result.json
+          if-no-files-found: error
