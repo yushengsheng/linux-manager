@@ -123,7 +123,7 @@ class DeploymentFieldsTests(unittest.TestCase):
         params = app._execute.call_args.args[0]
         self.assertEqual(params["service"], "reality")
         self.assertEqual(params["port"], 443)
-        self.assertEqual(params["server_name"], "www.microsoft.com")
+        self.assertEqual(params["server_name"], "www.cloudflare.com")
         self.assertNotIn("proxy_password", params); self.assertNotIn("panel_password", params)
         self.assertEqual(app.deploy_optional_rows["server_name"].winfo_manager(), "grid")
         self.assertNotIn("TCP 80", app.deploy_network_hint.cget("text"))
