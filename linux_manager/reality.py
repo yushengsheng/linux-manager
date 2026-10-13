@@ -6,7 +6,7 @@ REALITY_BINARY = "/usr/local/lib/linux-manager-xray/xray"
 REALITY_DIRECTORY = "/etc/linux-manager-xray"
 REALITY_CONFIG = REALITY_DIRECTORY + "/config.json"
 REALITY_UNIT = "linux-manager-xray.service"
-REALITY_DEFAULT_TARGET = "www.microsoft.com"
+REALITY_DEFAULT_TARGET = "www.cloudflare.com"
 
 
 def _reality_paths_check():

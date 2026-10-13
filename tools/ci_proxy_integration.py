@@ -115,7 +115,7 @@ def main():
     hy2={'operation':'deploy','service':'hysteria2','host':'127.0.0.1','port':51752,'version':hy2_version,'proxy_password':secrets.token_urlsafe(30),'tls_cert':(artifacts/'hy2.crt').read_text(),'tls_key':(artifacts/'hy2.key').read_text()}
     submit(hy2);traffic('hysteria2')
     hy2_config=Path('/etc/sing-box/config.json').read_bytes()
-    params={'operation':'deploy','service':'reality','host':'127.0.0.1','port':443,'version':xray_version,'server_name':'www.microsoft.com'}
+    params={'operation':'deploy','service':'reality','host':'127.0.0.1','port':443,'version':xray_version}
     submit(params);traffic('reality');original=identity(details('reality'))
     check(Path('/etc/sing-box/config.json').read_bytes()==hy2_config,'HY2 configuration preserved by REALITY install')
     same=submit(params|{'version_policy':'keep'});check(same['result']['action']=='unchanged','identical deployment does not reinstall')

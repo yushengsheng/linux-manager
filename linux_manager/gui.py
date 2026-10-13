@@ -809,7 +809,7 @@ class App(tk.Tk):
         self.deploy_backend = tk.StringVar(value="18880")
         self.deploy_username = tk.StringVar(value="manager")
         self.deploy_password = tk.StringVar()
-        self.deploy_server_name = tk.StringVar(value="www.microsoft.com")
+        self.deploy_server_name = tk.StringVar(value="www.cloudflare.com")
         self.version_mode = tk.StringVar(value=LATEST_STABLE)
         self.deploy_version = tk.StringVar(value="部署前自动获取")
         self.deploy_rows = {}
@@ -1723,7 +1723,7 @@ class App(tk.Tk):
             self.deploy_version.set(current.get("version") or "预览时读取现有版本")
             self.version_mode.set(KEEP_CURRENT)
             if key == "exchange": self.deploy_backend.set(str(current.get("backend_port", 18880)))
-            if key == "reality": self.deploy_server_name.set(current.get("server_name", "www.microsoft.com"))
+            if key == "reality": self.deploy_server_name.set(current.get("server_name", "www.cloudflare.com"))
             if key == "hysteria2": self.deploy_password.set(current.get("proxy_password", ""))
             if key == "xui":
                 self.deploy_username.set(current.get("panel_username", ""))
@@ -1734,7 +1734,7 @@ class App(tk.Tk):
             self.deploy_password.set("")
             self.deploy_username.set("manager")
             self.deploy_backend.set("18880")
-            self.deploy_server_name.set("www.microsoft.com")
+            self.deploy_server_name.set("www.cloudflare.com")
         self._deployment_fields()
         hints = {"exchange": "确认 TCP 网页端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写 UDP 节点端口和服务密码；HY2 不使用 TCP 节点端口。已有项目会按新条件调整；原密码不变时可以留空。", "reality": "只填 TCP 节点端口；连接凭据自动生成，无需自有域名和证书。部署后在运行与备份复制 VLESS 节点链接，或点击二维码图标扫码导入。已有节点调整端口或版本时保留原凭据。", "xui": "填写 TCP 面板端口、面板账号和密码；节点端口另按各自协议放行。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
         self.deploy_hint.configure(text=hints[key])
@@ -1807,7 +1807,7 @@ class App(tk.Tk):
             if key != "nginx" or self.version_mode.get() == SPECIFIC_VERSION: params["version"] = self.deploy_version.get().strip()
             if self.version_mode.get() == KEEP_CURRENT: params["version_policy"] = "keep"
             if key == "exchange": params["backend_port"] = validate_port(self.deploy_backend.get())
-            if key == "reality": params["server_name"] = self.deploy_server_name.get().strip() or "www.microsoft.com"
+            if key == "reality": params["server_name"] = self.deploy_server_name.get().strip() or "www.cloudflare.com"
             existing = bool(self._deployment_current(key))
             if key == "hysteria2": params["proxy_password"] = validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else ""
             if key == "xui": params.update(panel_username=validate_user(self.deploy_username.get()), panel_password=validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else "")
