@@ -104,6 +104,7 @@ def main():
         Path("/usr/local/share/ca-certificates/linux-manager-ci-issued.crt").write_bytes(root)
         run(["update-ca-certificates"])
         nginx_params = {"service": "nginx", "host": args.address, "port": args.web_port}
+        exchange_digest = None
         def deploy_nginx():
             task(remote)
             plan = remote.deployment_preflight(nginx_params)
@@ -111,13 +112,15 @@ def main():
             return plan
 
         def deploy_exchange():
+            nonlocal exchange_digest
             task(remote)
             params = {"service": "exchange", "version": "v1.1.88", "host": args.address,
                       "port": 26483, "backend_port": 18880}
             plan = remote.deployment_preflight(params)
             wire = params | {"deployment_fingerprint": plan["fingerprint"]}
             remote.deploy(wire)
-            check(wire["release_sha256"] == "5507422fe74144b7c179db3d408dfe660726776927acd36ea6ab0a55d1826370", "Linux downloaded and verified the official exchange release")
+            exchange_digest = wire["release_sha256"]
+            check(exchange_digest == "5507422fe74144b7c179db3d408dfe660726776927acd36ea6ab0a55d1826370", "Linux downloaded and verified the official exchange release")
 
         if args.order == "nginx-first":
             deploy_nginx()
@@ -185,7 +188,7 @@ def main():
         check(Path(remote.NGINX_MANAGED_SITE).is_file(), "webpage uninstall recovery restores its original route")
 
         summary = {"order": args.order, "address_type": "ip" if args.address == "127.0.0.1" else "domain",
-                   "web_port": args.web_port, "exchange": "v1.1.88", "exchange_sha256": digest,
+                   "web_port": args.web_port, "exchange": "v1.1.88", "exchange_sha256": exchange_digest,
                    "certbot": run([remote.ensure_certbot(), "--version"]).stdout.strip(),
                    "nginx": run(["nginx", "-v"]).stderr.strip(), "result": "passed",
                    "scope": "Real official installation, systemd, HTTP-01 and HTTPS renewal against local Pebble CA; no public production CA or trading accounts"}

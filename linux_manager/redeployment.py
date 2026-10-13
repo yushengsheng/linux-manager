@@ -164,8 +164,14 @@ def deployment_preflight(params):
         value = params.get("panel_password")
         if value:
             password(value)
-            import bcrypt
-            if not data.get("_password_hash") or not bcrypt.checkpw(value.encode(), data["_password_hash"].encode()):
+            matched = False
+            if data.get("_password_hash"):
+                try:
+                    import bcrypt
+                except ImportError:
+                    raise OperationError("Linux 缺少 python3-bcrypt，无法核对已有面板密码；请先恢复该系统依赖。") from None
+                matched = bcrypt.checkpw(value.encode(), data["_password_hash"].encode())
+            if not matched:
                 changes.append({"field": "panel_password", "name": "面板密码", "before": "已隐藏", "after": "将更新"})
         else:
             require(present and data.get("_password_hash"), "首次安装或缺少原账号时需要填写面板密码。")

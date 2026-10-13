@@ -3,6 +3,7 @@ import importlib.util
 import json
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 import tempfile
 import types
@@ -60,6 +61,12 @@ class ConditionPlanTests(unittest.TestCase):
                 plan = REMOTE.deployment_preflight({"service":kind,"host":"fixture.invalid","port":26483,"version":version})
                 self.assertEqual(plan["action"], "update"); self.assertTrue(plan["requires_archive"])
         self.available.assert_not_called()
+
+    def test_first_panel_preview_needs_no_bcrypt_before_dependency_install(self):
+        self.current = {"installed": False, "_present": False, "_ready": False}
+        with mock.patch.dict(sys.modules, {"bcrypt": None}):
+            plan = REMOTE.deployment_preflight({"service": "xui", "host": "fixture.invalid", "port": 2053, "version": "v3.9.0", "panel_username": "fixture", "panel_password": "fictional-panel-password"})
+        self.assertEqual(plan["action"], "install")
 
     def test_nginx_uses_exact_versions_from_system_repository(self):
         self.current["version"] = "1.24.0-2ubuntu7"
