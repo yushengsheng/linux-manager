@@ -1,18 +1,18 @@
 # linux服务器管理
 
-在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.10**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
+在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.11**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
 
 ## 下载与更新
 
-从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.10.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
+从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.11.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
 
 先正常退出旧程序再打开新版。沿用原本机档案、私钥及钥匙串，不需要重新添加服务器；新版可能需要再次允许访问钥匙串。本包使用临时签名，未经过 Apple 开发者公证：确认下载来源和校验值后，如系统拦截，按 macOS「隐私与安全性」的提示允许打开，不要关闭系统安全检查。
 
-更新说明见 [v0.3.10 发布说明](RELEASE_NOTES.md)。
+更新说明见 [v0.3.11 发布说明](RELEASE_NOTES.md)。
 
 ## 功能
 
-v0.3.10 源码与独立 App／ZIP 均包含 Nginx 网页入口与小军交易系统按任意顺序安装的证书申请和续期兼容修复，已通过 [GitHub 全新 Ubuntu 实测](https://github.com/yushengsheng/linux-manager/actions/runs/38136138493)。已有两项目共存的服务器，可保留 Nginx 当前参数再次预览并部署，补齐续期兼容；升级管理器不会自动修改服务器。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
+v0.3.11 源码与独立 App／ZIP 均包含 Nginx 网页入口与小军交易系统按任意顺序安装的证书申请和续期兼容修复，已通过 [GitHub 全新 Ubuntu 实测](https://github.com/yushengsheng/linux-manager/actions/runs/38136138493)。已有两项目共存的服务器，可保留 Nginx 当前参数再次预览并部署，补齐续期兼容；升级管理器不会自动修改服务器。详细验证范围见[测试记录](linux服务器管理测试记录.md)。
 
 - 左侧保存多台服务器与多账号档案；点击即可使用保存的登录信息连接，可用连接直接复用。
 - 单机工作区：概览、应用管理、账号、安全与操作记录；全部既有功能保留。
@@ -22,7 +22,9 @@ v0.3.10 源码与独立 App／ZIP 均包含 Nginx 网页入口与小军交易系
 - 账号创建、改名、密码和加密密钥管理、登录方式设置及一键安全方案。
 - 所有新密码设置入口可一键生成 40 字符强随机密码，新私钥口令为 48 字符；确认密码同步填写。普通账号新密码提交前保存并回读本机钥匙串副本，可从操作记录离线查看。
 - 自动安全更新同时核验生效配置和实际 APT 定时调度；不立即补跑升级、不自动重启，失败恢复原配置与定时器状态。
-- 小军交易系统、Hysteria2、3x-ui 代理面板及 Nginx 的安装、配置调整和版本切换。
+- 小军交易系统、Hysteria2、独立 VLESS + REALITY + Vision、3x-ui 代理面板及 Nginx 的安装、配置调整和版本切换。
+- 独立 VLESS 仅填写 TCP 端口，自动生成连接凭据，无需面板、自有域名或证书；与 HY2 可共存。部署后复制单节点链接导入客户端。
+- HY2 / VLESS 链接旁提供二维码图标，点击即可扫码导入；二维码只在本机生成。
 - 小军交易查询 GitHub API 受限时，自动使用官方公开发行页面和下载链接；无需 GitHub 登录，仍核对具体版本及 SHA-256。
 - 部署前显示变化：条件一致无需重复安装，配置变化按需调整，升级降级先备份，失败恢复原项目。
 - 服务维护、配置备份恢复、访问网址、端口、节点和订阅信息、运行日志及操作记录。Nginx 核心管理与交易专属入口分离，部署回滚失败可按原任务再次恢复并核验服务状态。
@@ -43,6 +45,7 @@ v0.3.10 源码与独立 App／ZIP 均包含 Nginx 网页入口与小军交易系
 使用安装了 Tk 的 Python 3.11 或更新版本（本轮回归使用 Python 3.11 / Tk 9）：
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 linux服务器管理.py --desktop-data
 python3 tools/run_tests.py
 ```

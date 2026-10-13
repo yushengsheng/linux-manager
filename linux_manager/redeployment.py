@@ -44,6 +44,8 @@ def _deployment_state(kind, address):
                 if match: data["version"] = "v" + match.group(1); executable_ready = True
             data["_ready"] = executable_ready and Path("/etc/sing-box/config.json").is_file() and "proxy_password" in data
             data["_present"] = binary.exists() or Path("/etc/sing-box/config.json").exists()
+        elif kind == "reality":
+            _reality_state(data)
         elif kind == "xui":
             binary = Path("/usr/local/x-ui/x-ui")
             executable_ready = False
@@ -81,7 +83,7 @@ def _deployment_state(kind, address):
                 data["host"] = address
         data.setdefault("host", address)
         return data
-    except (OSError, ValueError, sqlite3.DatabaseError):
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.DatabaseError):
         raise OperationError("已有项目配置无法读取，已保留数据。请先修复配置或从有效备份恢复，不能清空覆盖。") from None
 
 
@@ -99,13 +101,13 @@ def _bootstrap_reset_allowed():
 
 
 def _state_fingerprint(data):
-    values = {key: data.get(key) for key in ["installed", "version", "host", "port", "backend_port", "proxy_password", "panel_username", "_password_hash", "_ready", "_present", "_certificate_state"]}
+    values = {key: data.get(key) for key in ["installed", "version", "host", "port", "backend_port", "proxy_password", "panel_username", "_password_hash", "_ready", "_present", "_certificate_state", "_config_sha256", "server_name"]}
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def deployment_preflight(params):
     kind = params.get("service")
-    require(kind in {"exchange", "hysteria2", "xui", "nginx"}, "部署项目无效。")
+    require(kind in {"exchange", "hysteria2", "reality", "xui", "nginx"}, "部署项目无效。")
     address = host(params.get("host")); number = port(params.get("port", 80 if kind == "nginx" else 0))
     release = platform.freedesktop_os_release()
     require((release.get("ID"), release.get("VERSION_ID")) in {("ubuntu", "24.04"), ("debian", "12"), ("debian", "13")}, "当前系统尚未支持自动部署。")
@@ -149,6 +151,10 @@ def deployment_preflight(params):
         secret = params.get("proxy_password") or data.get("proxy_password")
         password(secret)
         change("proxy_password", secret, "服务密码", True)
+    elif kind == "reality":
+        server_name = _reality_server_name(params.get("server_name") or data.get("server_name") or REALITY_DEFAULT_TARGET)
+        change("server_name", server_name, "REALITY 目标域名")
+        require(not present or data.get("uuid"), "原 REALITY 配置缺失，不能重置连接凭据；请从配置备份恢复。")
     elif kind == "xui":
         account = params.get("panel_username") or data.get("panel_username")
         username(account)
@@ -172,7 +178,7 @@ def deployment_preflight(params):
         elif kind == "exchange":
             require(Path("/opt/xiaojun-exchange/current/version.txt").is_file() or data.get("uninstalled") and data.get("uninstall_task") and data.get("version") and Path("/etc/xiaojun-exchange/server.env").is_file() and Path("/var/lib/xiaojun-exchange").is_dir(), "安装布局无法识别，已保留交易数据；请先恢复官方安装布局，不能清空覆盖。")
             action = "repair"
-        elif kind in {"hysteria2", "xui"}:
+        elif kind in {"hysteria2", "reality", "xui"}:
             action = "repair"
         else:
             action = "install"
@@ -180,6 +186,7 @@ def deployment_preflight(params):
             "installed": present, "reinstall": bool(data.get("uninstalled")), "version": requested, "port": number, "host": address,
             "changes": changes, "fingerprint": _state_fingerprint(data),
             "requires_archive": kind != "nginx" and action in {"install", "update", "repair", "retry"},
+            "server_name": server_name if kind == "reality" else None,
             "backend_port": port(params.get("backend_port", data.get("backend_port", 18880))) if kind == "exchange" else None}
 
 
@@ -204,6 +211,7 @@ def _deployment_backup(kind, action):
     paths = {
         "exchange": ["/etc/xiaojun-exchange", "/opt/xiaojun-exchange/current"],
         "hysteria2": ["/etc/sing-box", "/usr/local/bin/sing-box"],
+        "reality": [REALITY_DIRECTORY, str(Path(REALITY_BINARY).parent)],
         "xui": ["/etc/x-ui", "/usr/local/x-ui"],
         "nginx": ["/etc/nginx"],
     }[kind]
@@ -247,6 +255,8 @@ def restore_deployment(identifier):
         if extra["service"] == "nginx" and unit == "linux-manager-cert-renew.service":
             continue
         if unit_info(unit).get("LoadState") == "loaded": command(["systemctl", "stop", unit], timeout=360, check=False)
+        if extra["service"] == "reality" and extra["unit_states"][unit].get("LoadState") == "not-found":
+            command(["systemctl", "disable", unit], check=False)
     if extra.get("nginx_version") and _nginx_package()[0] != extra["nginx_version"]:
         folder = ROOT / "tasks" / identifier / "nginx-original-packages"
         packages = sorted(str(file) for file in folder.glob("*.deb"))
@@ -552,7 +562,7 @@ def deploy(params):
         archive = TASK / "release.tar.gz"
         require(archive.is_file(), "缺少已校验的目标版本安装包，未执行改动。")
         require(hashlib.sha256(archive.read_bytes()).hexdigest() == params.get("release_sha256"), "目标版本安装包校验失败。")
-    if action == "install" and kind != "nginx":
+    if action == "install" and kind not in {"nginx", "reality"}:
         return _initial_deploy(params)
     step("备份原配置与必要数据，只调整变化的部署条件…", 15)
     _deployment_backup(kind, action)
@@ -563,6 +573,6 @@ def deploy(params):
             if Path(path).exists(): shutil.rmtree(path)
         result = _initial_deploy(params)
     else:
-        {"exchange":_change_exchange,"hysteria2":_change_hysteria,"xui":_change_xui,"nginx":_change_nginx}[kind](params, plan)
+        {"exchange":_change_exchange,"hysteria2":_change_hysteria,"reality":_change_reality,"xui":_change_xui,"nginx":_change_nginx}[kind](params, plan)
         result = {"service":kind,"version":plan["version"],"port":plan["port"],"verified":"new-configuration-and-service"}
     return result | {"action":action,"backup_id":TASK.name,"changes":plan["changes"]}

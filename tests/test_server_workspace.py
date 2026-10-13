@@ -1,3 +1,4 @@
+import base64
 import json
 import secrets
 import sys
@@ -85,6 +86,23 @@ class ServerWorkspaceTests(unittest.TestCase):
         app.update()
         self.assertEqual(app.notebook.select(), str(app.pages["日常维护"]))
         self.store.vault.put.assert_not_called()
+
+    def test_node_qr_dialog_renders_complete_image_and_copies_link(self):
+        from linux_manager.qr import qr_png
+        links = ['hysteria2://fixture@one.invalid:51752/?sni=one.invalid#HY2',
+                 'vless://fixture@one.invalid:443?security=reality&flow=xtls-rprx-vision#REALITY']
+        self.app._copy = mock.Mock()
+        for link in links:
+            self.app._show_node_qr(link); self.app.update()
+            dialog = next(child for child in self.app.winfo_children() if isinstance(child, tk.Toplevel))
+            expected = tk.PhotoImage(master=self.app, data=base64.b64encode(qr_png(link)).decode())
+            self.assertEqual(dialog.qr_image.width(), expected.width())
+            self.assertEqual(dialog.qr_image.height(), expected.height())
+            self.assertEqual(dialog.qr_image.get(24, 24), expected.get(24, 24))
+            frame = dialog.winfo_children()[0]
+            button = next(child.button for child in frame.winfo_children() if hasattr(child, 'button'))
+            button.invoke(); self.app._copy.assert_called_with(link)
+            dialog.destroy()
 
     def test_sidebar_uses_saved_session_credentials_and_connects_only_selected_host(self):
         app = self.app

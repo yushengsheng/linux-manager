@@ -44,7 +44,7 @@ class UninstallSandboxTests(unittest.TestCase):
         self.active = {}; self.enabled = {}; self.calls = []; self.failure = None
         self.stack.enter_context(mock.patch.object(REMOTE, "command", side_effect=self.command))
         self.secret = secrets.token_urlsafe(30)
-        self.records = {kind: {"installed": "fixture-time", "version": {"exchange": "v1.1.88", "hysteria2": "v1.14.3", "xui": "v3.9.0", "nginx": "1.24.0"}[kind], "host": "fixture.invalid", "port": 26484 if kind == "exchange" else 51752 if kind == "hysteria2" else 2053 if kind == "xui" else 80} for kind in REMOTE.UNINSTALL_LAYOUTS}
+        self.records = {kind: {"installed": "fixture-time", "version": {"exchange": "v1.1.88", "hysteria2": "v1.14.3", "reality": "v26.3.27", "xui": "v3.9.0", "nginx": "1.24.0"}[kind], "host": "fixture.invalid", "port": 26484 if kind == "exchange" else 51752 if kind == "hysteria2" else 2053 if kind == "xui" else 80} for kind in REMOTE.UNINSTALL_LAYOUTS}
         self.records["exchange"].update(certificate_source="manager", certificate_lineage="/etc/linux-server-manager/letsencrypt/live/manager")
         self.records["nginx"]["config_file"] = "/etc/nginx/conf.d/linux-manager-default.conf"
         self.write("/var/lib/linux-server-manager/installed.json", json.dumps(self.records))
@@ -103,6 +103,7 @@ class UninstallSandboxTests(unittest.TestCase):
 
     def unit_text(self, unit):
         if unit == "sing-box.service": start = "/usr/local/bin/sing-box run -c /etc/sing-box/config.json"
+        elif unit == "linux-manager-xray.service": start = "/usr/local/lib/linux-manager-xray/xray run -config /etc/linux-manager-xray/config.json"
         elif unit == "x-ui.service": start = "/usr/local/x-ui/x-ui"
         elif unit == "xiaojun-exchange-nginx.service": start = "/usr/sbin/nginx -c /etc/xiaojun-exchange/nginx.conf"
         elif unit == "xiaojun-exchange-logrotate.service": start = "/usr/sbin/logrotate /etc/logrotate.d/xiaojun-exchange"

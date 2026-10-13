@@ -42,6 +42,7 @@ class DeploymentFieldsTests(unittest.TestCase):
         for service, expected in [
             ("exchange", {"port"}),
             ("hysteria2", {"port", "proxy_password"}),
+            ("reality", {"port"}),
             ("xui", {"port", "username", "panel_password"}),
             ("nginx", {"port"}),
             ("exchange", {"port"}),
@@ -113,6 +114,19 @@ class DeploymentFieldsTests(unittest.TestCase):
         self.assertEqual(params["panel_username"], "fixture")
         self.assertNotIn("backend_port", params)
         self.assertNotIn("proxy_password", params)
+
+    def test_reality_only_submits_port_and_optional_target_without_password(self):
+        app = self.prepare_deployment(); self.choose("reality")
+        app.deploy_password.set("unused-hy2-password")
+        with mock.patch("linux_manager.gui.official_version", return_value="v26.3.27"):
+            app._deploy()
+        params = app._execute.call_args.args[0]
+        self.assertEqual(params["service"], "reality")
+        self.assertEqual(params["port"], 443)
+        self.assertEqual(params["server_name"], "www.microsoft.com")
+        self.assertNotIn("proxy_password", params); self.assertNotIn("panel_password", params)
+        self.assertEqual(app.deploy_optional_rows["server_name"].winfo_manager(), "grid")
+        self.assertNotIn("TCP 80", app.deploy_network_hint.cget("text"))
 
 
 if __name__ == "__main__":

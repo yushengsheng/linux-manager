@@ -44,5 +44,25 @@ class MaintenancePageTests(unittest.TestCase):
         app._account_servers();self.assertEqual(len(app.account_server_map),2)
         self.assertEqual(app.account_server_box.current(),0)
 
+    def test_node_qr_icon_uses_full_selected_link_and_resets_on_project_change(self):
+        app=self.app;value='hysteria2://fixture-secret@one.invalid:51752/?sni=one.invalid#HY2'
+        app.project_details[(server_key(app.current),'hysteria2')]={'rows':[('节点',value),('服务端口','51752 / UDP')]}
+        app.manage_choice.set(SERVICES['hysteria2'][0]);app.privacy.set(True);app._project_changed()
+        self.assertEqual(app.project_info_tree.item('0','values')[-1],'▦')
+        self.assertEqual(app.project_info_tree.item('1','values')[-1],'')
+        app.project_info_tree.selection_set('0');app._select_project_info()
+        self.assertEqual(str(app.node_qr_button.button.cget('state')),'normal')
+        app._show_node_qr=mock.Mock();app._show_selected_node_qr();app._show_node_qr.assert_called_once_with(value)
+        app.manage_choice.set(SERVICES['reality'][0]);app._project_changed()
+        self.assertEqual(str(app.node_qr_button.button.cget('state')),'disabled')
+
+    def test_clicking_qr_column_opens_matching_node_without_using_truncated_text(self):
+        app=self.app;value='vless://fixture@one.invalid:443?security=reality&flow=xtls-rprx-vision'
+        app.project_rows=[('node',value)];app._show_node_qr=mock.Mock()
+        with mock.patch.object(app.project_info_tree,'identify_column',return_value='#3'),mock.patch.object(app.project_info_tree,'identify_row',return_value='0'):
+            app.project_info_tree.insert('', 'end', iid='0', values=('node','hidden','▦'))
+            app._node_qr_clicked(SimpleNamespace(x=1,y=1))
+        app._show_node_qr.assert_called_once_with(value)
+
 
 if __name__=='__main__':unittest.main()

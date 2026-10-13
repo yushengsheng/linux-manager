@@ -13,6 +13,7 @@ USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 SERVICES = {
     "exchange": ("小军交易系统", ("xiaojun-exchange-web.service", "xiaojun-exchange-worker.service", "xiaojun-exchange-nginx.service")),
     "hysteria2": ("Hysteria2 代理", ("sing-box.service",)),
+    "reality": ("VLESS + REALITY + Vision", ("linux-manager-xray.service",)),
     "xui": ("代理管理面板", ("x-ui.service",)),
     "nginx": ("Nginx 网页入口", ("nginx.service",)),
 }

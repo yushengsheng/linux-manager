@@ -10,7 +10,7 @@ import urllib.request
 from .models import ManagerError
 from .releases import github_cli, https_context
 
-REPOSITORIES = {'hysteria2':'SagerNet/sing-box','xui':'MHSanaei/3x-ui'}
+REPOSITORIES = {'hysteria2':'SagerNet/sing-box','reality':'XTLS/Xray-core','xui':'MHSanaei/3x-ui'}
 
 
 def official_release(service, version=None):
@@ -46,7 +46,10 @@ def download_project(service, version, architecture, destination):
     arch={'x86_64':'amd64','aarch64':'arm64'}.get(architecture)
     if not arch:raise ManagerError('当前服务器架构尚未支持此项目。')
     release=official_release(service,version)
-    name=f'sing-box-{version[1:]}-linux-{arch}.tar.gz' if service=='hysteria2' else f'x-ui-linux-{arch}.tar.gz'
+    if service == 'reality':
+        name = 'Xray-linux-' + {'amd64':'64', 'arm64':'arm64-v8a'}[arch] + '.zip'
+    else:
+        name=f'sing-box-{version[1:]}-linux-{arch}.tar.gz' if service=='hysteria2' else f'x-ui-linux-{arch}.tar.gz'
     asset=next((item for item in release.get('assets',[]) if item.get('name')==name),None)
     if not asset:raise ManagerError('官方发行版缺少匹配服务器架构的安装包。')
     expected=str(asset.get('digest') or '').removeprefix('sha256:')
