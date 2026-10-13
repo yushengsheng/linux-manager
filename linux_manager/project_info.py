@@ -6,19 +6,21 @@ import urllib.parse
 
 from .vault import vault_alias
 
-SERVICE_PROTOCOLS = {"exchange": "TCP", "hysteria2": "UDP", "xui": "TCP", "nginx": "TCP"}
+SERVICE_PROTOCOLS = {"exchange": "TCP", "hysteria2": "UDP", "reality": "TCP", "xui": "TCP", "nginx": "TCP"}
 
 
 def deployment_network_hint(service, number, backend=None):
     protocol = SERVICE_PROTOCOLS[service]
     other = "TCP" if protocol == "UDP" else "UDP"
-    purpose = "面板网页" if service == "xui" else "HY2 节点" if service == "hysteria2" else "网页"
+    purpose = "面板网页" if service == "xui" else "HY2 节点" if service == "hysteria2" else "REALITY 节点" if service == "reality" else "网页"
     lines = [f"{purpose}入口：放行 {protocol} {number or '所填端口'}，此入口不需要开放 {other}。"]
     if service == "exchange":
         lines.append(f"内部服务：TCP {backend or '内部端口'}，仅服务器本机使用，不向公网开放。")
     if service == "xui":
         lines.append("代理节点和订阅端口独立于面板；节点按配置使用 TCP、UDP 或两者，请在「运行与备份」查看各节点协议。")
-    if service != "nginx":
+    if service == "reality":
+        lines.append("无需自有域名和证书；只需此 TCP 节点端口。部署后复制 VLESS 单节点链接导入支持 REALITY / Vision 的客户端。")
+    elif service != "nginx":
         lines.append("证书申请 / 续期的 HTTP 验证另需 TCP 80，与业务端口的协议无关。")
     lines.append("服务器防火墙与云平台安全组都需按对应协议放行；云平台规则需自行设置。")
     return "\n".join(lines)
@@ -81,6 +83,11 @@ def authority(host, port):
 
 def node_links(data, fallback_host):
     host=data.get('host') or fallback_host
+    if data.get('service') == 'reality':
+        required = ('uuid', 'public_key', 'short_id', 'server_name', 'port')
+        if not all(data.get(key) for key in required):return []
+        query = {'encryption':'none', 'type':'tcp', 'security':'reality', 'flow':'xtls-rprx-vision', 'sni':data['server_name'], 'fp':'chrome', 'pbk':data['public_key'], 'sid':data['short_id']}
+        return [('VLESS 节点链接', 'vless://' + urllib.parse.quote(data['uuid'], safe='') + '@' + authority(host, data['port']) + '?' + urllib.parse.urlencode(query) + '#' + urllib.parse.quote('VLESS REALITY Vision', safe=''))]
     if data.get('service')=='hysteria2' and data.get('proxy_password') and data.get('port'):
         query=urllib.parse.urlencode({'sni':data.get('sni') or host})
         return [('Hysteria2 节点','hysteria2://'+urllib.parse.quote(data['proxy_password'],safe='')+'@'+authority(host,data['port'])+'/?'+query+'#Hysteria2')]
@@ -150,6 +157,10 @@ def information_rows(data, connection, credentials=None):
     if kind=='xui':
         rows.extend([('后台账号',data.get('panel_username') or credentials.get('panel_username') or '未能读取'),('后台密码',credentials.get('panel_password') or '未在本机保存；可点击「补充登录信息」填写')])
     if kind=='hysteria2' and data.get('proxy_password'):rows.append(('服务密码',data['proxy_password']))
+    if kind == 'reality':
+        rows.append(('节点协议', 'VLESS + REALITY + Vision'))
+        if data.get('server_name'):rows.append(('REALITY 目标域名', data['server_name']))
+        rows.append(('导入方式', '复制 VLESS 节点链接到支持 REALITY / Vision 的客户端；这是单节点链接'))
     if kind=='xui' and data.get('subscription_port'):
         scope = '仅服务器本机，无需公网放行' if data.get('subscription_local_only') else '订阅入口，需单独放行'
         rows.append(('订阅服务端口',str(data['subscription_port'])+' / TCP（'+scope+'）'))

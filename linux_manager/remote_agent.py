@@ -37,6 +37,7 @@ ROOT = Path("/var/lib/linux-server-manager")
 UNITS = {
     "exchange": ["xiaojun-exchange-web.service", "xiaojun-exchange-worker.service", "xiaojun-exchange-nginx.service"],
     "hysteria2": ["sing-box.service"],
+    "reality": ["linux-manager-xray.service"],
     "xui": ["x-ui.service"],
     "nginx": ["nginx.service"],
 }
@@ -1672,6 +1673,7 @@ def configuration_backup(params):
     paths = {
         "security": ["/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d", "/etc/ufw", "/etc/sudoers.d", "/etc/systemd/system/ssh.socket.d", "/etc/fail2ban/jail.d/99-linux-manager.local", *update_configuration_paths()],
         "hysteria2": ["/etc/sing-box", "/etc/systemd/system/sing-box.service"],
+        "reality": ["/etc/linux-manager-xray", "/etc/systemd/system/linux-manager-xray.service"],
         "xui": ["/etc/x-ui", "/etc/systemd/system/x-ui.service"],
         "nginx": ["/etc/nginx"],
     }
@@ -1693,7 +1695,7 @@ def configuration_restore(params):
     manifest_path = ROOT / "tasks" / identifier / "backup/manifest.json"
     require(manifest_path.exists(), "所选任务没有备份。")
     manifest = json.loads(manifest_path.read_text())
-    require(manifest.get("extra", {}).get("service") in {"security", "hysteria2", "xui", "nginx"}, "账号数据库仅允许由原任务的恢复机制处理，不能覆盖其他账号变更。")
+    require(manifest.get("extra", {}).get("service") in {"security", "hysteria2", "reality", "xui", "nginx"}, "账号数据库仅允许由原任务的恢复机制处理，不能覆盖其他账号变更。")
     current_paths = [row["path"] for row in manifest["paths"]]
     kind = manifest["extra"]["service"]
     extra = {"firewall_active": firewall_snapshot()["active"], "service": kind}
@@ -1797,6 +1799,8 @@ def connection_details(params):
         data.setdefault("port",26483)
         certificate_file = next((p for p in ["/etc/xiaojun-exchange/tls/fullchain.pem", "/etc/xiaojun-exchange/letsencrypt/live/exchange-ip/fullchain.pem"] if Path(p).is_file()),"")
         return certificate_expiry(data,certificate_file)
+    if kind == "reality":
+        return reality_details(data)
     if kind == "hysteria2":
         path = Path("/etc/sing-box/config.json")
         if not path.is_file():return data
@@ -1922,6 +1926,12 @@ def rpc():
         result = {"ok": False, "message": clean(error) if isinstance(error, OperationError) else "服务器检查失败，请确认系统和管理员权限。"}
     print("LM_RESULT:" + json.dumps(result, ensure_ascii=False))
 
+
+#LM_BUNDLED_REALITY#
+if globals().get("LM_REALITY_SOURCE"):
+    exec(compile(LM_REALITY_SOURCE, "<linux-manager-reality>", "exec"), globals())
+elif "__file__" in globals() and Path(__file__).with_name("reality.py").is_file():
+    exec(compile(Path(__file__).with_name("reality.py").read_text(), "<linux-manager-reality>", "exec"), globals())
 
 #LM_BUNDLED_REDEPLOYMENT#
 if globals().get("LM_REDEPLOYMENT_SOURCE"):

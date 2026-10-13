@@ -284,7 +284,7 @@ class Controller:
                 self.disconnect_connection(connection.identifier)
             self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": "submission_unknown", "created": created, "message": "正在提交；尚未确认服务器是否收到，勿重复执行。"})
             poll_connection = self._submit_task(connection, wire, identifier, params, progress, timeout)
-        deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "xui", "nginx"}
+        deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "reality", "xui", "nginx"}
         pending_values = None
         if deployment:
             preflight = self.retry_call(connection, {"action": "deployment_preflight", "params": wire}, progress=progress)

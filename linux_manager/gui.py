@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import json
 import os
@@ -25,6 +26,7 @@ from .widgets import HelpAction, ScrollPage, install_check_style, sync_tree
 from .key_info import encrypted_key
 from .project_info import server_key, credential_alias, SERVICE_PROTOCOLS, deployment_network_hint
 from .official_packages import official_version
+from .qr import is_node_link, qr_png
 
 BASE = Path(__file__).resolve().parents[1]
 BG = "#f4f6fa"
@@ -807,6 +809,7 @@ class App(tk.Tk):
         self.deploy_backend = tk.StringVar(value="18880")
         self.deploy_username = tk.StringVar(value="manager")
         self.deploy_password = tk.StringVar()
+        self.deploy_server_name = tk.StringVar(value="www.cloudflare.com")
         self.version_mode = tk.StringVar(value=LATEST_STABLE)
         self.deploy_version = tk.StringVar(value="部署前自动获取")
         self.deploy_rows = {}
@@ -836,6 +839,7 @@ class App(tk.Tk):
         for index, (name, label, variable, private) in enumerate([
             ("host", "访问域名（可留空）", self.deploy_host, True),
             ("backend", "内部端口（交易系统）", self.deploy_backend, False),
+            ("server_name", "REALITY 目标域名", self.deploy_server_name, False),
         ]):
             row = ttk.Frame(self.deploy_optional_frame); row.grid(row=index, column=0, sticky="w")
             row.columnconfigure(0, minsize=190)
@@ -843,14 +847,14 @@ class App(tk.Tk):
             if name == "backend":
                 ttk.Label(row, text="TCP · 仅本机，不向公网开放", style="Muted.TLabel").grid(row=0, column=2, sticky="w", padx=12)
             self.deploy_optional_rows[name] = row
-        version_row = ttk.Frame(self.deploy_optional_frame); version_row.grid(row=2, column=0, sticky="w")
+        version_row = ttk.Frame(self.deploy_optional_frame); version_row.grid(row=3, column=0, sticky="w")
         version_row.columnconfigure(0, minsize=190)
         self.deploy_optional_rows["version_mode"] = version_row
         self._help_label(version_row, "版本选择").grid(row=0, column=0, sticky="e", padx=(0, 12), pady=6)
         self.version_box = ttk.Combobox(version_row, textvariable=self.version_mode, values=[LATEST_STABLE, SPECIFIC_VERSION], state="readonly", width=37)
         self.version_box.grid(row=0, column=1, sticky="w", pady=6)
         self.version_box.bind("<<ComboboxSelected>>", self._version_fields)
-        version_entry_row = ttk.Frame(self.deploy_optional_frame); version_entry_row.grid(row=3, column=0, sticky="w")
+        version_entry_row = ttk.Frame(self.deploy_optional_frame); version_entry_row.grid(row=4, column=0, sticky="w")
         version_entry_row.columnconfigure(0, minsize=190)
         self.deploy_optional_rows["version"] = version_entry_row
         self.version_entry = self._field(version_entry_row, 0, "安装版本", self.deploy_version)
@@ -880,10 +884,21 @@ class App(tk.Tk):
         self._button(actions, "查看运行日志", self._logs).pack(side="left", padx=12)
         self._button(actions, "安装 / 调整配置", self._configure_project).pack(side="left")
         information = ttk.LabelFrame(page, text="项目信息 · 可直接复制使用", padding=12); information.pack(fill="x", pady=(12, 8))
-        self.project_info_tree = self._tree(information, [("name", "信息", 240), ("value", "内容", 720)], height=9)
+        self.project_info_tree = self._tree(information, [("name", "信息", 240), ("value", "内容", 660), ("qr", "扫码", 60)], height=9)
+        self.project_info_tree.column("qr", width=60, minwidth=60, stretch=False, anchor="center")
         self.project_info_tree.bind("<<TreeviewSelect>>", self._select_project_info)
+        self.project_info_tree.bind("<ButtonRelease-1>", self._node_qr_clicked)
         self.project_info_value = tk.StringVar()
-        ttk.Entry(information, textvariable=self.project_info_value, state="readonly").pack(fill="x", pady=8)
+        link_row = ttk.Frame(information); link_row.pack(fill="x", pady=8)
+        ttk.Entry(link_row, textvariable=self.project_info_value, state="readonly").pack(side="left", fill="x", expand=True)
+        self.node_qr_icon = tk.PhotoImage(master=link_row, width=21, height=21)
+        self.node_qr_icon.put("white", to=(0, 0, 21, 21))
+        for x, y in [(1, 1), (13, 1), (1, 13)]:
+            self.node_qr_icon.put(INK, to=(x, y, x+7, y+7)); self.node_qr_icon.put("white", to=(x+1, y+1, x+6, y+6)); self.node_qr_icon.put(INK, to=(x+2, y+2, x+5, y+5))
+        for x, y in [(10, 9), (13, 12), (17, 10), (10, 16), (16, 16), (18, 19)]:self.node_qr_icon.put(INK, to=(x, y, x+2, y+2))
+        self.node_qr_button = self._button(link_row, "展示节点二维码", self._show_selected_node_qr, track=False)
+        self.node_qr_button.button.configure(image=self.node_qr_icon, text="", width=3, state="disabled")
+        self.node_qr_button.pack(side="left", padx=(8, 0))
         actions = ttk.Frame(information); actions.pack(fill="x")
         self._button(actions, "复制选中项", self._copy_project_item).pack(side="left")
         self._button(actions, "复制全部项目信息", self._copy_project_information).pack(side="left", padx=10)
@@ -1351,7 +1366,7 @@ class App(tk.Tk):
         self.allow_password.set(password_enabled)
         self.allow_root.set("yes" in r["ssh"].get("permitrootlogin", []))
         service_rows = []
-        purposes = {"exchange": "币安多账号交易、资产查询和资金管理", "hysteria2": "Hysteria2 网络代理服务", "xui": "代理账号与节点的网页管理", "nginx": "网页入口、HTTPS 和后端转发"}
+        purposes = {"exchange": "币安多账号交易、资产查询和资金管理", "hysteria2": "Hysteria2 网络代理服务", "reality": "独立 VLESS + REALITY + Vision 节点", "xui": "代理账号与节点的网页管理", "nginx": "网页入口、HTTPS 和后端转发"}
         for key, units in r["services"].items():
             installed = [u for u in units if u.get("LoadState") == "loaded"]
             state = "运行中" if any(u.get("ActiveState") == "active" for u in installed) else "已停止" if installed else "尚未安装"
@@ -1698,7 +1713,7 @@ class App(tk.Tk):
 
     def _deploy_defaults(self, _=None):
         key = self._service_key(self.deploy_choice.get())
-        defaults = {"exchange": (26483, "部署前自动获取"), "hysteria2": (51752, "v1.14.2"), "xui": (2053, "v3.9.0"), "nginx": (80, "系统软件包")}
+        defaults = {"exchange": (26483, "部署前自动获取"), "hysteria2": (51752, "v1.14.2"), "reality": (443, "v26.3.27"), "xui": (2053, "v3.9.0"), "nginx": (80, "系统软件包")}
         number, version = defaults[key]; self.deploy_port.set(str(number)); self.deploy_version.set(version)
         self.version_mode.set(LATEST_STABLE)
         current = self._deployment_current(key)
@@ -1708,6 +1723,7 @@ class App(tk.Tk):
             self.deploy_version.set(current.get("version") or "预览时读取现有版本")
             self.version_mode.set(KEEP_CURRENT)
             if key == "exchange": self.deploy_backend.set(str(current.get("backend_port", 18880)))
+            if key == "reality": self.deploy_server_name.set(current.get("server_name", "www.cloudflare.com"))
             if key == "hysteria2": self.deploy_password.set(current.get("proxy_password", ""))
             if key == "xui":
                 self.deploy_username.set(current.get("panel_username", ""))
@@ -1718,8 +1734,9 @@ class App(tk.Tk):
             self.deploy_password.set("")
             self.deploy_username.set("manager")
             self.deploy_backend.set("18880")
+            self.deploy_server_name.set("www.cloudflare.com")
         self._deployment_fields()
-        hints = {"exchange": "确认 TCP 网页端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写 UDP 节点端口和服务密码；HY2 不使用 TCP 节点端口。已有项目会按新条件调整；原密码不变时可以留空。", "xui": "填写 TCP 面板端口、面板账号和密码；节点端口另按各自协议放行。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
+        hints = {"exchange": "确认 TCP 网页端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写 UDP 节点端口和服务密码；HY2 不使用 TCP 节点端口。已有项目会按新条件调整；原密码不变时可以留空。", "reality": "只填 TCP 节点端口；连接凭据自动生成，无需自有域名和证书。部署后在运行与备份复制 VLESS 节点链接，或点击二维码图标扫码导入。已有节点调整端口或版本时保留原凭据。", "xui": "填写 TCP 面板端口、面板账号和密码；节点端口另按各自协议放行。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
         self.deploy_hint.configure(text=hints[key])
 
     def _deployment_current(self, key):
@@ -1736,11 +1753,11 @@ class App(tk.Tk):
 
     def _deployment_fields(self):
         key = self._service_key(self.deploy_choice.get())
-        visible = {"exchange": {"port"}, "hysteria2": {"port", "proxy_password"}, "xui": {"port", "username", "panel_password"}, "nginx": {"port"}}[key]
+        visible = {"exchange": {"port"}, "hysteria2": {"port", "proxy_password"}, "reality": {"port"}, "xui": {"port", "username", "panel_password"}, "nginx": {"port"}}[key]
         for name, row in self.deploy_rows.items():
             row.grid() if name in visible else row.grid_remove()
         for name, row in self.deploy_optional_rows.items():
-            shown = name == "host" and key != "nginx" or name == "backend" and key == "exchange" or name == "version_mode"
+            shown = name == "host" and key != "nginx" or name == "backend" and key == "exchange" or name == "server_name" and key == "reality" or name == "version_mode"
             if name != "version":
                 row.grid() if shown else row.grid_remove()
         self.deploy_optional_header.pack(fill="x", pady=(14, 0), before=self.deploy_hint)
@@ -1752,7 +1769,7 @@ class App(tk.Tk):
 
     def _deploy_network_changed(self, *_):
         key = self._service_key(self.deploy_choice.get())
-        purpose = "HY2 节点" if key == "hysteria2" else "面板网页" if key == "xui" else "网页入口"
+        purpose = "HY2 节点" if key == "hysteria2" else "REALITY 节点" if key == "reality" else "面板网页" if key == "xui" else "网页入口"
         self.deploy_port_protocol.configure(text=SERVICE_PROTOCOLS[key]+"（"+purpose+"）")
         self.deploy_network_hint.configure(text=deployment_network_hint(key, self.deploy_port.get().strip(), self.deploy_backend.get().strip()))
 
@@ -1775,7 +1792,7 @@ class App(tk.Tk):
         if automatic:
             self.deploy_version.set("部署前自动获取" if key != "nginx" else "预览时读取系统仓库版本")
         elif not keeping and key != "nginx" and not self.deploy_version.get().startswith("v"):
-            self.deploy_version.set({"exchange":"v1.1.85", "hysteria2":"v1.14.3", "xui":"v3.9.0"}[key])
+            self.deploy_version.set({"exchange":"v1.1.85", "hysteria2":"v1.14.3", "reality":"v26.3.27", "xui":"v3.9.0"}[key])
         elif not keeping and key == "nginx" and self.deploy_version.get().startswith(("预览", "系统")):
             self.deploy_version.set("")
         if "deploy_optional_rows" in self.__dict__:
@@ -1790,6 +1807,7 @@ class App(tk.Tk):
             if key != "nginx" or self.version_mode.get() == SPECIFIC_VERSION: params["version"] = self.deploy_version.get().strip()
             if self.version_mode.get() == KEEP_CURRENT: params["version_policy"] = "keep"
             if key == "exchange": params["backend_port"] = validate_port(self.deploy_backend.get())
+            if key == "reality": params["server_name"] = self.deploy_server_name.get().strip() or "www.cloudflare.com"
             existing = bool(self._deployment_current(key))
             if key == "hysteria2": params["proxy_password"] = validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else ""
             if key == "xui": params.update(panel_username=validate_user(self.deploy_username.get()), panel_password=validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else "")
@@ -1903,8 +1921,9 @@ class App(tk.Tk):
         information = self.project_details.get((identity,key), {})
         self.project_rows = list(information.get("rows", []))
         hidden = self.privacy.get()
-        sync_tree(self.project_info_tree, [(str(i),(name,"已隐藏；关闭右上角隐藏开关可查看" if hidden and name not in {"项目状态","安装版本","端口协议"} else value)) for i,(name,value) in enumerate(self.project_rows)])
+        sync_tree(self.project_info_tree, [(str(i),(name,"已隐藏；关闭右上角隐藏开关可查看" if hidden and name not in {"项目状态","安装版本","端口协议"} else value, "▦" if is_node_link(value) else "")) for i,(name,value) in enumerate(self.project_rows)])
         self.project_info_value.set("")
+        if "node_qr_button" in self.__dict__: self.node_qr_button.configure(state="disabled")
         if not self.project_rows:
             sync_tree(self.project_info_tree, [("placeholder",("项目信息","连接服务器后点击刷新；只显示当前服务器的项目。"))])
         self._replace_text(self.maintenance_text,self.project_logs.get((identity,key),"所选项目的运行日志会在这里显示。点击「查看运行日志」读取。"))
@@ -1922,7 +1941,36 @@ class App(tk.Tk):
     def _select_project_info(self, _=None):
         selected = self.project_info_tree.selection()
         if selected and selected[0].isdigit() and int(selected[0])<len(self.project_rows):
-            self.project_info_value.set("已隐藏" if self.privacy.get() else self.project_rows[int(selected[0])][1])
+            value = self.project_rows[int(selected[0])][1]
+            self.project_info_value.set("已隐藏" if self.privacy.get() else value)
+            if "node_qr_button" in self.__dict__: self.node_qr_button.configure(state="normal" if is_node_link(value) else "disabled")
+
+    def _node_qr_clicked(self, event):
+        if self.project_info_tree.identify_column(event.x) != "#3":return
+        row = self.project_info_tree.identify_row(event.y)
+        if row.isdigit() and int(row) < len(self.project_rows) and is_node_link(self.project_rows[int(row)][1]):
+            self.project_info_tree.selection_set(row)
+            self._show_node_qr(self.project_rows[int(row)][1])
+
+    def _show_selected_node_qr(self):
+        selected = self.project_info_tree.selection()
+        if selected and selected[0].isdigit() and int(selected[0]) < len(self.project_rows):
+            value = self.project_rows[int(selected[0])][1]
+            if is_node_link(value):self._show_node_qr(value)
+
+    def _show_node_qr(self, value):
+        try:
+            png = qr_png(value)
+        except ManagerError as error:
+            messagebox.showerror("节点二维码", str(error), parent=self)
+            return
+        dialog = tk.Toplevel(self); dialog.title("扫码导入节点"); dialog.transient(self); dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=20); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="使用代理客户端扫码导入", style="Heading.TLabel").pack()
+        dialog.qr_image = tk.PhotoImage(master=dialog, data=base64.b64encode(png).decode())
+        ttk.Label(frame, image=dialog.qr_image).pack(pady=12)
+        ttk.Label(frame, text="二维码包含完整节点凭据，请仅供自己的设备扫描。", wraplength=380, justify="center").pack()
+        self._button(frame, "复制节点链接", lambda:self._copy(value), track=False).pack(pady=(12, 0))
 
     def _copy_project_item(self):
         selected = self.project_info_tree.selection()

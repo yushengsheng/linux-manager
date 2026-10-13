@@ -8,6 +8,7 @@ UNINSTALL_LAYOUTS = {
         "retain": ["/etc/xiaojun-exchange", "/var/lib/xiaojun-exchange", "/var/lib/xiaojun-exchange-acme", "/var/log/xiaojun-exchange-nginx", "/var/log/xiaojun-exchange-acme"],
     },
     "hysteria2": {"programs": ["/usr/local/bin/sing-box"], "units": ["sing-box.service"], "extras": [], "retain": ["/etc/sing-box"]},
+    "reality": {"programs": ["/usr/local/lib/linux-manager-xray"], "units": ["linux-manager-xray.service"], "extras": [], "retain": ["/etc/linux-manager-xray"]},
     "xui": {"programs": ["/usr/local/x-ui"], "units": ["x-ui.service"], "extras": [], "retain": ["/etc/x-ui"]},
     "nginx": {"programs": [], "units": [], "extras": ["/etc/nginx/conf.d/linux-manager-default.conf"], "retain": ["/var/www", "/etc/nginx"]},
 }
@@ -142,6 +143,8 @@ def uninstall_preflight(params):
             config = json.loads(Path("/etc/sing-box/config.json").read_text())
             inbounds = config.get("inbounds")
             require(isinstance(inbounds, list) and len(inbounds) == 1 and inbounds[0].get("type") == "hysteria2", "sing-box 还包含其他节点或无法识别的配置，不能作为独立 HY2 卸载。")
+        if kind == "reality" and Path(REALITY_CONFIG).exists():
+            _reality_configuration()
         if kind == "nginx" and Path(paths[0]).exists():
             require(Path(paths[0]).read_text().startswith("# Managed by linux-server-manager\n"), "Nginx 站点归属无法确认，不能移除自定义网站。")
         _uninstall_references(kind)

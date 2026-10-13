@@ -164,6 +164,7 @@ class SSH:
         source = Path(__file__).with_name("remote_agent.py").read_text()
         lock = Path(__file__).with_name("resources") / "requirements-certbot.lock"
         source = source.replace("#LM_BUNDLED_CERTBOT#", "CERTBOT_LOCK = " + repr(lock.read_text()))
+        source = source.replace("#LM_BUNDLED_REALITY#", "LM_REALITY_SOURCE = " + repr(Path(__file__).with_name("reality.py").read_text()))
         source = source.replace("#LM_BUNDLED_REDEPLOYMENT#", "LM_REDEPLOYMENT_SOURCE = " + repr(Path(__file__).with_name("redeployment.py").read_text()))
         source = source.replace("#LM_BUNDLED_UNINSTALLATION#", "LM_UNINSTALLATION_SOURCE = " + repr(Path(__file__).with_name("uninstallation.py").read_text()))
         envelope = json.dumps({"agent": source, "request": request}, ensure_ascii=False).encode()
