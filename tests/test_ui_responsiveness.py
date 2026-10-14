@@ -6,11 +6,34 @@ import unittest
 from unittest import mock
 
 from linux_manager.gui import App
-from linux_manager.models import Connection
+from linux_manager.models import Connection, ManagerError
 from linux_manager.widgets import install_check_style, sync_tree, ScrollPage
 
 
 class ResponsiveCallbacksTests(unittest.TestCase):
+    def test_finished_worker_releases_captured_ui_objects_on_main_thread(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                finalized = []
+                class Callback:
+                    def __call__(self):
+                        if failed: raise ManagerError('合成失败')
+                        return 'finished'
+                    def __del__(self):
+                        finalized.append(threading.get_ident())
+                app = object.__new__(App)
+                app.status = mock.Mock(); app.progress = mock.Mock()
+                app.busy = False; app.buttons = []; app.inputs = []; app.events = queue.Queue()
+                app._run(Callback())
+                kind, _, _ = app.events.get(timeout=3)
+                self.assertEqual(kind, 'error' if failed else 'done')
+                for thread in [item[0] for item in app._worker_contexts]:
+                    thread.join(timeout=2)
+                self.assertEqual(finalized, [])
+                app._reap_workers()
+                self.assertEqual(finalized, [threading.get_ident()])
+                self.assertFalse(app._worker_contexts)
+
     def test_explicit_save_runs_keychain_io_on_existing_background_worker(self):
         app = object.__new__(App)
         conn = Connection(host="fixture.invalid", username="fixture", password="fictional-password")

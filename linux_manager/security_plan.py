@@ -71,15 +71,13 @@ def apply_plan(controller, original, options, progress):
                 run("修改并验证用户名", {"operation": "rename_user", "old_username": updated.username, "new_username": target})
             if new_password:
                 run("修改并验证系统密码", {"operation": "password", "username": updated.username, "new_password": new_password})
-        run("启用仅密钥登录与基础防护", {"operation": "login_policy", "username": updated.username})
+        run("启用新管理员仅密钥登录" if mode == "create" else "启用仅密钥登录与基础防护", {"operation": "login_policy", "username": updated.username, "scope": "user" if mode == "create" else "server"})
         if old_public:
             run("撤销原档案的旧钥匙", {"operation": "retire_key", "username": updated.username, "old_public_key": old_public, "public_key": public})
-        if options.get("fail2ban", True):
+        if mode == "rename" and options.get("fail2ban", True):
             run("启用防猜密码保护", {"operation": "fail2ban", "enabled": True, "ssh_port": updated.port})
-        if options.get("updates", True):
+        if mode == "rename" and options.get("updates", True):
             run("启用安全更新（不自动重启）", {"operation": "updates", "enabled": True})
-        if mode == "create" and options.get("block_original", True) and original.username != "root":
-            run("禁止原账号 SSH 登录", {"operation": "account_access", "username": original.username, "blocked": True})
     except ManagerError as error:
         # Keep the last independently verified account after a later step fails.
         message = str(error)

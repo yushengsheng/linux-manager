@@ -26,6 +26,8 @@ class Controller:
         self.connection_listener = lambda state: None
         self._connection_lock = threading.Lock()
         self._connections_closed = False
+        self._oauth_login = None
+        self._oauth_pending_cancellations = {}
 
     def transport(self, connection: Connection, fresh=False) -> SSH:
         control = self.connections.control_path(connection) if self.connections and not fresh else None
@@ -52,6 +54,8 @@ class Controller:
         with self._connection_lock:
             self._connections_closed = True
             manager = self.connections
+        if self._oauth_login:
+            self._oauth_login.cancel()
         if manager:
             manager.close()
 
@@ -93,8 +97,8 @@ class Controller:
         return {"tasks": tasks}
 
     def _project_information(self, connection, service, data):
-        values = self.store.vault.get(credential_alias(connection,service)) if service in {"exchange","hysteria2","xui"} else {}
-        if service in {"hysteria2", "xui"}:
+        values = self.store.vault.get(credential_alias(connection,service)) if service in {"exchange","hysteria2","xui","cliproxyapi"} else {}
+        if service in {"hysteria2", "xui", "cliproxyapi"}:
             alias = vault_alias("service-pending", credential_alias(connection, service))
             pending = self.store.vault.get(alias)
             verified = bool(pending.get("proxy_password") and pending["proxy_password"] == data.get("proxy_password")) if service == "hysteria2" else False
@@ -105,7 +109,15 @@ class Controller:
                     # An incomplete installation must not hide the other
                     # projects or replace the last known working password.
                     verified = False
-            if verified:
+            if service == "cliproxyapi":
+                proposed = pending.get("management_key") or values.get("management_key")
+                if proposed and data.get("installed"):
+                    try:
+                        verified = self.transport(connection).call({"action": "verify_cliproxy_key", "management_key": proposed}).get("verified", False)
+                    except ManagerError:
+                        verified = False
+                data["management_key_valid"] = verified
+            if verified and pending:
                 self.store.vault.put(credential_alias(connection, service), pending)
                 self.store.vault.delete(alias)
                 values = pending
@@ -114,6 +126,47 @@ class Controller:
     def project_information(self, connection, service):
         data = self.transport(connection).call({"action":"details","service":service,"host":connection.host})
         return self._project_information(connection,service,data)
+
+    def oauth_login(self, connection, provider):
+        from .oauth import OAuthLogin
+        connection = connection.changed()  # Pin a snapshot, not a mutable GUI/profile object.
+        with self._connection_lock:
+            if self._connections_closed:
+                raise ManagerError("程序正在关闭，不再发起授权。")
+            if self._oauth_login and not self._oauth_login.finished.is_set():
+                raise ManagerError("另一项登录授权尚未结束，请先完成或取消。")
+            def rpc(operation, **params):
+                # The captured connection never follows GUI selection changes.
+                secret = self.store.vault.get(credential_alias(connection, 'cliproxyapi')).get('management_key')
+                if not secret:
+                    raise ManagerError("请先在‘补充登录信息’保存现有管理 Key，再登录授权。")
+                pending_key = (server_key(connection), params.get('session_id'))
+                if operation == 'start':
+                    with self._connection_lock:
+                        pending = list(self._oauth_pending_cancellations.items())
+                    for (target, _), previous in pending:
+                        if target == server_key(connection):
+                            result = rpc('cancel', **previous)
+                            if result.get('cancel_unconfirmed') or result.get('cleanup_failed'):
+                                raise ManagerError('服务器尚未完成上次授权清理；请稍后重试，旧授权页不可继续使用。')
+                try:
+                    result = self.retry_call(connection, {'action': 'cliproxy_oauth', 'oauth_operation': operation,
+                                                         'management_key': secret, **params}, timeout=6 if operation == 'cancel' else 30,
+                                             **({'deadline': time.monotonic() + 12} if operation == 'cancel' else {}))
+                except ManagerError:
+                    if operation == 'cancel':
+                        with self._connection_lock:
+                            self._oauth_pending_cancellations[pending_key] = dict(params)
+                    raise
+                if operation == 'cancel':
+                    with self._connection_lock:
+                        if result.get('cancel_unconfirmed') or result.get('cleanup_failed'):
+                            self._oauth_pending_cancellations[pending_key] = dict(params)
+                        else:
+                            self._oauth_pending_cancellations.pop(pending_key, None)
+                return result
+            self._oauth_login = OAuthLogin(provider, rpc)
+            return self._oauth_login
 
     def deployment_preview(self, connection, params, cancel_event=None):
         return self.transport(connection).call({"action":"deployment_preflight", "params":params}, timeout=90, **({"cancel_event": cancel_event} if cancel_event is not None else {}))
@@ -296,7 +349,7 @@ class Controller:
                 self.disconnect_connection(connection.identifier)
             self.store.record({"task_id": identifier, "server_id": connection.identifier, "operation": params["operation"], "state": "submission_unknown", "created": created, "message": "正在提交；尚未确认服务器是否收到，勿重复执行。"})
             poll_connection = self._submit_task(connection, wire, identifier, params, progress, timeout, **({"cancel_event": cancel_event} if cancel_event is not None else {}))
-        deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "reality", "xui", "nginx"}
+        deployment = params.get("operation") == "deploy" and params.get("service") in {"exchange", "hysteria2", "reality", "xui", "nginx", "cliproxyapi"}
         pending_values = None
         if deployment:
             preflight = self.retry_call(connection, {"action": "deployment_preflight", "params": wire}, progress=progress, cancel_event=cancel_event)
@@ -305,11 +358,16 @@ class Controller:
             kind = params["service"]
             wire["version"] = preflight["version"]
             wire["deployment_fingerprint"] = preflight["fingerprint"]
-            if kind in {"hysteria2", "xui"}:
-                pending_values = self.store.vault.get(credential_alias(connection, kind)) | {key:params[key] for key in ["proxy_password", "panel_username", "panel_password"] if params.get(key)}
+            if kind in {"hysteria2", "xui", "cliproxyapi"}:
+                pending_values = self.store.vault.get(credential_alias(connection, kind)) | {key:params[key] for key in ["proxy_password", "panel_username", "panel_password", "management_key"] if params.get(key)}
                 # Escrow proposed values locally without replacing a working
                 # panel password before the server change has been verified.
-                self.store.vault.put(vault_alias("service-pending", credential_alias(connection, kind)), pending_values)
+                alias = vault_alias("service-pending", credential_alias(connection, kind))
+                self.store.vault.put(alias, pending_values)
+                if kind == "cliproxyapi":
+                    self.store.vault.cache.pop(alias, None)
+                    if self.store.vault.get(alias) != pending_values:
+                        raise ManagerError("管理 Key 无法从本机钥匙串回读，服务器尚未修改。")
             if preflight["requires_archive"]:
                 progress({"state": "preparing", "progress": 0, "message": "提交安装任务，Linux 将直接下载并校验官方发行包…"})
             submit()
@@ -370,7 +428,7 @@ class Controller:
             self.store.vault.put(credential_alias(connection, params["service"]), pending_values)
             self.store.vault.delete(vault_alias("service-pending", credential_alias(connection, params["service"])))
         if params["operation"] == "ssh" and original.port != connection.port:
-            for kind in ["exchange", "hysteria2", "xui"]:
+            for kind in ["exchange", "hysteria2", "xui", "cliproxyapi"]:
                 values = self.store.vault.get(credential_alias(original,kind))
                 if values:
                     self.store.vault.put(credential_alias(connection,kind),values)

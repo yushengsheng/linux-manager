@@ -30,6 +30,12 @@ class LocalDataTests(unittest.TestCase):
             gui.main()
         store.assert_not_called()
 
+    def test_self_check_reports_broken_tk_without_reading_credentials(self):
+        with mock.patch.object(sys, 'argv', ['source', '--self-check']), mock.patch.object(gui.tk, 'Tk', side_effect=gui.tk.TclError('fixture broken Tk')), mock.patch.object(gui, 'Store') as store:
+            with self.assertRaisesRegex(SystemExit, '图形界面'):
+                gui.main()
+        store.assert_not_called()
+
     def test_old_application_lock_prevents_another_source_window(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)
@@ -43,6 +49,14 @@ class LocalDataTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "macOS 原生本地启动器")
 class LocalLauncherTests(unittest.TestCase):
+    def test_python_discovery_accepts_an_installed_runtime_without_an_architecture_specific_path(self):
+        import os
+        result = subprocess.run(['/bin/sh', str(BASE / 'scripts/find-python.sh'), str(BASE)],
+                                env=os.environ | {'LINUX_MANAGER_PYTHON': sys.executable},
+                                capture_output=True, text=True, timeout=12)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), sys.executable)
+
     def test_native_entry_runs_current_source_without_a_packaged_main_app(self):
         with tempfile.TemporaryDirectory(prefix="lm-local- 中文'空格-", dir="/private/tmp") as folder:
             root = Path(folder)
@@ -52,7 +66,7 @@ class LocalLauncherTests(unittest.TestCase):
             launcher = root / "启动本地最新版.app"
             script = root / "fixture.applescript"
             text = SOURCE.read_text()
-            original = '        set pythonPath to (POSIX path of (path to home folder)) & ".local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11"'
+            original = '        set pythonPath to do shell script "/bin/sh " & quoted form of (folderPath & "/scripts/find-python.sh") & " " & quoted form of folderPath'
             quoted = '"' + sys.executable.replace('\\', '\\\\').replace('"', '\\"') + '"'
             self.assertIn(original, text)
             script.write_text(text.replace(original, "        set pythonPath to " + quoted))

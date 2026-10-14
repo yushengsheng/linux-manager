@@ -44,15 +44,15 @@ def main():
         state = status.get("state")
         if state in {"awaiting_verification", "preparing"}:
             print("ISOLATED_TEST: " + state, flush=True)
-    print("ISOLATED_TEST: 新增管理员一键方案（含防猜密码与安全更新）", flush=True)
-    result = controller.security_plan(original, {"mode": "create", "username": names["created"], "block_original": False}, progress)
+    print("ISOLATED_TEST: 新增管理员一键方案（仅新账号策略）", flush=True)
+    result = controller.security_plan(original, {"mode": "create", "username": names["created"]}, progress)
     if not result["complete"]: raise ManagerError("新增方案未全部完成，请在本机记录核对已完成步骤。")
     created = result["connection"]
     atomic_private(record, json.dumps({"state": "created", **names, "profile_id": created.identifier}))
     controller.transport(created).call({"action": "ping"})
     before = controller.account_details(created, created.username)
     print("ISOLATED_TEST: 改名并轮换密钥一键方案", flush=True)
-    result = controller.security_plan(created, {"mode": "rename", "username": names["renamed"], "retire_old_key": True, "fail2ban": False, "updates": False}, progress)
+    result = controller.security_plan(created, {"mode": "rename", "username": names["renamed"], "retire_old_key": True}, progress)
     if not result["complete"]: raise ManagerError("改名方案未全部完成，请在本机记录核对已完成步骤。")
     renamed = result["connection"]
     after = controller.account_details(renamed, renamed.username)

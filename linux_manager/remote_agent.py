@@ -70,12 +70,14 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def private_write(path, content, mode=0o600):
+def private_write(path, content, mode=0o600, *, owner=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".write-")
     try:
         os.fchmod(fd, mode)
+        if owner is not None:
+            os.fchown(fd, *owner)
         with os.fdopen(fd, "wb") as stream:
             stream.write(content.encode() if isinstance(content, str) else content)
             stream.flush()
@@ -96,14 +98,16 @@ def clean(value):
         if secret:
             text = text.replace(secret, "[已隐藏]")
     text = re.sub(r"(?<![\w])(?:\d{1,3}\.){3}\d{1,3}(?![\w])", "[服务器地址]", text)
-    text = re.sub(r"(?i)((?:password|passwd|secret|token|api[_-]?key|authorization)\s*[=:]\s*)[^\s,;]+", r"\1[已隐藏]", text)
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;\"'<>]+", "Bearer [已隐藏]", text)
+    text = re.sub(r"(?i)([?&](?:code|state|oauth_code|authorization_code)=)[^&\s#]+", r"\1[已隐藏]", text)
+    text = re.sub(r"(?i)((?:password|passwd|secret|token|management[_-]?key|api[_-]?keys?|authorization)\s*[=:]\s*)[^\s,;]+", r"\1[已隐藏]", text)
     text = re.sub(r"(?:hysteria2|hy2|ss|vmess|vless|trojan)://\S+", "[连接信息已隐藏]", text)
     return text
 
 
 def register_secrets(params):
     for key, value in params.items():
-        if isinstance(value, str) and (re.search(r"password|secret|token|key|host|user|account", key, re.I)):
+        if isinstance(value, str) and (re.search(r"password|secret|token|key|host|user|account|code|state", key, re.I)):
             SECRETS.add(value)
 
 
@@ -378,6 +382,7 @@ def submit_task(params, identifier=None):
         require(hmac.compare_digest(saved["digest"], submission_digest(params, saved["key"])), "任务编号已经用于其他请求，未执行重复提交。")
         return {"task_id": identifier}
     # Changes waiting for independent SSH verification must finish first.
+    require(not (globals().get('cp_oauth_busy') and cp_oauth_busy()), '授权正在进行，请先完成或取消，暂不提交维护任务。')
     require(not any(s["state"] in {"queued", "running", "awaiting_verification", "recovery_failed"} for s in task_list()), "另一个任务尚未完成，请先查看操作记录并完成验证或恢复。")
     key = secrets.token_hex(32)
     receipt = {"key": key, "digest": submission_digest(params, key)}
@@ -450,7 +455,7 @@ def backup_files(paths, extra=None):
     return target
 
 
-def restore_files(task):
+def restore_files(task, *, project_only=False):
     target = ROOT / "tasks" / validate_task_id(task) / "backup"
     require((target / "manifest.json").is_file(), "该任务没有可恢复的配置备份。")
     manifest = json.loads((target / "manifest.json").read_text())
@@ -501,7 +506,7 @@ def restore_files(task):
         # Update rollback must not reload SSH or alter firewall/account settings.
         return
     command(["systemctl", "daemon-reload"], check=False)
-    if extra.get("deployment"):
+    if extra.get("deployment") or project_only:
         return
     if shutil.which("ufw"):
         if extra.get("firewall_active"):
@@ -716,9 +721,26 @@ def managed_accounts():
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+USER_LOGIN_MARKER = "\n# linux-manager managed user login policies\n"
+USER_LOGIN_VALUES = {"PasswordAuthentication": "no", "KbdInteractiveAuthentication": "no", "PubkeyAuthentication": "yes", "AuthenticationMethods": "publickey", "PermitEmptyPasswords": "no", "X11Forwarding": "no", "AllowAgentForwarding": "no"}
+
+
+def split_user_login_policies(text):
+    base, marker, policies = text.partition(USER_LOGIN_MARKER)
+    if not marker:
+        return text, ""
+    body = "".join(f"    {key} {value}\n" for key, value in USER_LOGIN_VALUES.items())
+    require(re.fullmatch(r"(?:Match User [a-z_][a-z0-9_-]{0,31}\n" + re.escape(body) + r")+", policies), "本程序的账号独立登录策略已被改动，暂不自动改写；请核对现有设置。")
+    return base, marker + policies
+
+
 def ssh_files_without_match():
     files = [Path("/etc/ssh/sshd_config"), *Path("/etc/ssh/sshd_config.d").glob("*.conf")]
-    require(not any(re.search(r"^\s*Match\s", file.read_text(), re.M | re.I) for file in files if file.is_file()), "检测到条件式 SSH 配置，无法安全自动修改；请保留现有设置。")
+    for file in files:
+        if file.is_file():
+            base, policies = split_user_login_policies(file.read_text())
+            require(not policies or file == Path("/etc/ssh/sshd_config"), "账号独立登录策略必须位于主 SSH 配置末尾，请核对现有设置。")
+            require(not re.search(r"^\s*Match\s", base, re.M | re.I), "检测到自定义条件式 SSH 配置，无法安全自动修改；请保留现有设置。")
     return files
 
 
@@ -773,13 +795,32 @@ def login_policy(params):
     require((Path(user.pw_dir) / ".ssh/authorized_keys").is_file(), "请先安装并验证密钥。")
     files = ssh_files_without_match()
     previous = ssh_configuration()
+    scope = params.get("scope", "server")
+    require(scope in {"user", "server"}, "登录策略范围不正确。")
+    if scope == "user":
+        require(previous.get("valid") and previous.get("query_valid"), "当前 SSH 配置检查失败，已停止变更。")
+        source = Path("/etc/ssh/sshd_config")
+        base, policies = split_user_login_policies(source.read_text())
+        if not re.search(r"(?m)^Match User " + re.escape(account) + r"$", policies):
+            # Match blocks must remain at EOF so global directives stay global.
+            policies = (policies or USER_LOGIN_MARKER) + f"Match User {account}\n" + "".join(f"    {key} {value}\n" for key, value in USER_LOGIN_VALUES.items())
+        backup_files([str(source)])
+        arm_recovery()
+        private_write(source, base + policies, source.stat().st_mode & 0o777)
+        command(["/usr/sbin/sshd", "-t"])
+        effective = ssh_configuration("user=" + account + ",host=localhost,addr=127.0.0.1")
+        require(effective.get("valid") and effective.get("query_valid") and all(effective.get(key.lower()) == [value] for key, value in USER_LOGIN_VALUES.items()), "新账号没有加载完整密钥登录策略，已停止并尝试恢复。")
+        require(ssh_configuration() == previous, "全局 SSH 策略发生变化，已停止并尝试恢复。")
+        command(["systemctl", "reload", "ssh.service"])
+        return {"requires_verification": True}
     values = {"PermitRootLogin": "no", "PasswordAuthentication": "no", "KbdInteractiveAuthentication": "no", "PubkeyAuthentication": "yes", "AuthenticationMethods": "publickey", "PermitEmptyPasswords": "no", "MaxAuthTries": str(min(3, int(previous.get("maxauthtries", ["3"])[0]))), "LoginGraceTime": str(min(60, int(previous.get("logingracetime", ["60"])[0])) or 60), "LogLevel": "VERBOSE", "X11Forwarding": "no", "AllowAgentForwarding": "no"}
     backup_files(["/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d"])
     arm_recovery()
     fields = {key.lower() for key in values}
     for source in files:
-        text = "".join("# linux服务器管理已接管此项: " + line if line.strip() and line.split()[0].lower() in fields else line for line in source.read_text().splitlines(keepends=True))
-        private_write(source, text, source.stat().st_mode & 0o777)
+        base, policies = split_user_login_policies(source.read_text())
+        text = "".join("# linux服务器管理已接管此项: " + line if line.strip() and line.split()[0].lower() in fields else line for line in base.splitlines(keepends=True))
+        private_write(source, text + policies, source.stat().st_mode & 0o777)
     private_write("/etc/ssh/sshd_config.d/00-linux-manager-login.conf", "".join(f"{key} {value}\n" for key, value in values.items()), 0o644)
     command(["/usr/sbin/sshd", "-t"])
     effective = ssh_configuration()
@@ -940,8 +981,9 @@ def ssh_hardening(params):
     fields = {key.lower() for key in values}
     for source in files:
         if source.is_file():
-            text = "".join("# linux服务器管理已接管此项: " + line if line.strip() and line.split()[0].lower() in fields else line for line in source.read_text().splitlines(keepends=True))
-            private_write(source, text, source.stat().st_mode & 0o777)
+            base, policies = split_user_login_policies(source.read_text())
+            text = "".join("# linux服务器管理已接管此项: " + line if line.strip() and line.split()[0].lower() in fields else line for line in base.splitlines(keepends=True))
+            private_write(source, text + policies, source.stat().st_mode & 0o777)
     private_write("/etc/ssh/sshd_config.d/01-linux-manager-protection.conf", "".join(f"{key} {value}\n" for key, value in values.items()), 0o644)
     command(["/usr/sbin/sshd", "-t"])
     effective = ssh_configuration()
@@ -998,8 +1040,7 @@ def ssh_settings(params):
     if not params.get("allow_root"):
         require(account != "root" and "sudo" in [g.gr_name for g in grp.getgrall() if account in g.gr_mem], "禁用超级管理员登录前，需要选择能够使用 sudo 的普通管理员并验证登录。")
     # Match blocks and account allowlists must not be silently overridden.
-    ssh_files = [Path("/etc/ssh/sshd_config"), *Path("/etc/ssh/sshd_config.d").glob("*.conf")]
-    require(not any(re.search(r"^\s*Match\s", f.read_text(), re.M | re.I) for f in ssh_files if f.is_file()), "检测到条件式 SSH 配置，第一版不自动改写，请保留现有设置。")
+    ssh_files = ssh_files_without_match()
     if new_port != old_port:
         ensure_port_available(new_port)
     keyfile = Path(user.pw_dir) / ".ssh/authorized_keys"
@@ -1025,9 +1066,10 @@ def ssh_settings(params):
     # OpenSSH uses the first value. Remove only directives managed by this operation.
     for source in ssh_files:
         if source.is_file():
-            lines = source.read_text().splitlines(keepends=True)
+            base, policies = split_user_login_policies(source.read_text())
+            lines = base.splitlines(keepends=True)
             changed = "".join("# linux服务器管理已接管此项: " + line if line.strip() and line.split()[0].lower() in {k.lower() for k in values} | {"port"} else line for line in lines)
-            private_write(source, changed, source.stat().st_mode & 0o777)
+            private_write(source, changed + policies, source.stat().st_mode & 0o777)
     managed = Path("/etc/ssh/sshd_config.d/00-linux-manager.conf")
     lines = [f"Port {new_port}"] + ([f"Port {old_port}"] if old_port != new_port else [])
     lines += [key + " " + value for key, value in values.items()]
@@ -1184,6 +1226,10 @@ def cert_hook():
                 script += 'if [ "$RENEWED_LINEAGE" = ' + shlex.quote(lineage) + ' ]; then\n'
             script += "systemctl try-restart " + UNITS[service][0] + " || true\n"
             if lineage: script += "fi\n"
+    ai = installed.get("cliproxyapi", {})
+    if ai.get("certificate_lineage") and not ai.get("uninstalled"):
+        script += 'if [ "$RENEWED_LINEAGE" = ' + shlex.quote(ai["certificate_lineage"]) + ' ]; then\n'
+        script += 'nginx -t && systemctl reload nginx.service || exit 1\nfi\n'
     for base in [Path("/etc/xiaojun-exchange/letsencrypt"), Path("/etc/linux-server-manager/letsencrypt")]:
         if base.exists():
             private_write(base / "renewal-hooks/deploy/linux-manager-proxies", script, 0o700)
@@ -1680,6 +1726,8 @@ def configuration_backup(params):
     step("正在备份配置…", 40)
     # backup_files snapshots the panel database consistently while it runs.
     extra = {"service": kind, "firewall_active": firewall_snapshot()["active"]}
+    if kind != "security":
+        extra["deployment"] = True
     if kind == "security":
         protection = unit_info("fail2ban.service")
         extra.update(fail2ban_active=protection.get("ActiveState") == "active", fail2ban_enabled=protection.get("UnitFileState") == "enabled", update_timers=update_timer_states())
@@ -1698,6 +1746,8 @@ def configuration_restore(params):
     current_paths = [row["path"] for row in manifest["paths"]]
     kind = manifest["extra"]["service"]
     extra = {"firewall_active": firewall_snapshot()["active"], "service": kind}
+    if kind != "security":
+        extra["deployment"] = True
     if kind == "security":
         protection = unit_info("fail2ban.service")
         extra.update(fail2ban_active=protection.get("ActiveState") == "active", fail2ban_enabled=protection.get("UnitFileState") == "enabled")
@@ -1705,7 +1755,7 @@ def configuration_restore(params):
             extra["update_timers"] = update_timer_states()
     backup_files(current_paths, extra)
     arm_recovery()
-    restore_files(identifier)
+    restore_files(identifier, project_only=kind != "security")
     kind = manifest["extra"]["service"]
     for unit in UNITS.get(kind, []):
         if unit_info(unit).get("LoadState") == "loaded":
@@ -1972,6 +2022,30 @@ if globals().get("LM_UNINSTALLATION_SOURCE"):
     exec(compile(LM_UNINSTALLATION_SOURCE, "<linux-manager-uninstallation>", "exec"), globals())
 elif "__file__" in globals() and Path(__file__).with_name("uninstallation.py").is_file():
     exec(compile(Path(__file__).with_name("uninstallation.py").read_text(), "<linux-manager-uninstallation>", "exec"), globals())
+
+#LM_BUNDLED_CLIPROXYAPI#
+if globals().get("LM_CLIPROXYAPI_SOURCE"):
+    exec(compile(LM_CLIPROXYAPI_SOURCE, "<linux-manager-cliproxyapi>", "exec"), globals())
+elif "__file__" in globals() and Path(__file__).with_name("cliproxyapi.py").is_file():
+    exec(compile(Path(__file__).with_name("cliproxyapi.py").read_text(), "<linux-manager-cliproxyapi>", "exec"), globals())
+
+#LM_BUNDLED_OAUTH_CONTRACT#
+if globals().get("LM_OAUTH_CONTRACT_SOURCE"):
+    exec(compile(LM_OAUTH_CONTRACT_SOURCE, "<linux-manager-oauth-contract>", "exec"), globals())
+elif "__file__" in globals() and Path(__file__).with_name("oauth_contract.py").is_file():
+    exec(compile(Path(__file__).with_name("oauth_contract.py").read_text(), "<linux-manager-oauth-contract>", "exec"), globals())
+
+#LM_BUNDLED_CLIPROXY_OAUTH#
+if globals().get("LM_CLIPROXY_OAUTH_SOURCE"):
+    exec(compile(LM_CLIPROXY_OAUTH_SOURCE, "<linux-manager-oauth>", "exec"), globals())
+elif "__file__" in globals() and Path(__file__).with_name("cliproxy_oauth.py").is_file():
+    exec(compile(Path(__file__).with_name("cliproxy_oauth.py").read_text(), "<linux-manager-oauth>", "exec"), globals())
+
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "cp-oauth":
+    cp_oauth_worker(sys.argv[2])
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in {"cp-update", "cp-backup"}:
+    cp_maintenance(sys.argv[1])
 
 if __name__ == "linux_manager_remote":
     rpc()

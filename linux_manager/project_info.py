@@ -6,7 +6,7 @@ import urllib.parse
 
 from .vault import vault_alias
 
-SERVICE_PROTOCOLS = {"exchange": "TCP", "hysteria2": "UDP", "reality": "TCP", "xui": "TCP", "nginx": "TCP"}
+SERVICE_PROTOCOLS = {"exchange": "TCP", "hysteria2": "UDP", "reality": "TCP", "xui": "TCP", "nginx": "TCP", "cliproxyapi": "TCP"}
 
 
 def deployment_network_hint(service, number, backend=None):
@@ -14,7 +14,7 @@ def deployment_network_hint(service, number, backend=None):
     other = "TCP" if protocol == "UDP" else "UDP"
     purpose = "面板网页" if service == "xui" else "HY2 节点" if service == "hysteria2" else "REALITY 节点" if service == "reality" else "网页"
     lines = [f"{purpose}入口：放行 {protocol} {number or '所填端口'}，此入口不需要开放 {other}。"]
-    if service == "exchange":
+    if service in {"exchange", "cliproxyapi"}:
         lines.append(f"内部服务：TCP {backend or '内部端口'}，仅服务器本机使用，不向公网开放。")
     if service == "xui":
         lines.append("代理节点和订阅端口独立于面板；节点按配置使用 TCP、UDP 或两者，请在「运行与备份」查看各节点协议。")
@@ -151,6 +151,38 @@ def information_rows(data, connection, credentials=None):
     if kind in {'exchange','xui','nginx'} and data.get('port'):
         url=(data.get('scheme') or ('http' if kind=='nginx' else 'https'))+'://'+authority(host,data['port'])+(data.get('path') or '/')
         rows.append(('后台网址' if kind=='xui' else '软件网址',url))
+    if kind == 'cliproxyapi' and not data.get('port'):
+        rows.append(('配置信息', data.get('information_error') or '公网入口未能读取；请检查配置，不要重复安装'))
+        rows.extend(('服务：' + unit['unit'], '运行中' if unit.get('ActiveState') == 'active' else '已停止') for unit in data.get('units', []))
+        return rows
+    if kind == 'cliproxyapi':
+        base = 'https://' + authority(host, data['port'])
+        rows.extend([('后台网址', base + '/management.html'), ('API 基础地址', base + '/v1'),
+                     ('Claude Code 基础地址', base), ('Responses 接口', base + '/v1/responses'),
+                     ('Messages 接口', base + '/v1/messages'), ('Chat Completions 接口', base + '/v1/chat/completions'),
+                     ('后台登录方式', '独立管理 Key，无需用户名'),
+                     ('管理 Key', credentials.get('management_key') or '未在本机保存；点击补充登录信息'),
+                     ('管理 Key 状态', '已验证有效' if data.get('management_key_valid') else '当前未验证或保存值已失效'),
+                     ('基础健康', data.get('health', '当前未验证')),
+                     ('内部监听', str(data.get('internal_host', '')) + ':' + str(data.get('backend_port', ''))),
+                     ('管理页面版本', data.get('versions', {}).get('panel', '未能读取')),
+                     ('Nginx 状态', data.get('nginx', {}).get('ActiveState', '未知'))])
+        rows.extend(('客户端 API Key ' + str(i), key) for i, key in enumerate(data.get('api_keys', []), 1))
+        timers = data.get('timers', {})
+        rows.extend([('自动更新', str(timers.get('linux-manager-cliproxyapi-update.timer', {}).get('UnitFileState', '未知'))),
+                     ('更新与备份调度', data.get('public_schedule') or data.get('update_schedule', '未能读取')),
+                     ('证书续期', str(data.get('certificate_renewal', {}).get('ActiveState', '未能读取'))),
+                     ('自动备份', str(timers.get('linux-manager-cliproxyapi-backup.timer', {}).get('ActiveState', '未知'))),
+                     ('最近更新检查', json.dumps(data.get('update_status', {}), ensure_ascii=False)),
+                     ('最近备份', json.dumps(data.get('backup_status', {}), ensure_ascii=False)),
+                     ('可回滚版本', json.dumps(data.get('rollback_version', {}), ensure_ascii=False) if data.get('rollback_version') else '尚无升级恢复版本'),
+                     ('运行详情', data.get('runtime', '未能读取')),
+                     ('上游账号数量', json.dumps(data.get('accounts', {}), ensure_ascii=False) if data.get('accounts') else '尚未添加'),
+                     ('模型目录', '、'.join(data.get('models', [])) or '尚无可用模型；请先在后台添加上游'),
+                     ('模型实测', '未实测；目录可读取不等于模型调用成功'),
+                     ('配额', '暂不可查询；以供应商和管理后台实际返回为准'),
+                     ('检查时间', data.get('checked', '未检查'))])
+        rows.extend(('授权账号 ' + str(i), account['provider'] + ' · ' + account['identity'] + ' · ' + account['state']) for i, account in enumerate(data.get('account_details', []), 1))
     if kind=='exchange':
         rows.append(('程序密码','首次打开管理网页时设置；本程序不读取交易系统的程序密码'))
         if data.get('initialization_code'):rows.append(('初始化码',data['initialization_code']))
@@ -174,5 +206,6 @@ def information_rows(data, connection, credentials=None):
     for unit in data.get('units',[]):
         state='运行中' if unit.get('ActiveState')=='active' else '已停止'
         rows.append(('服务：'+unit['unit'],state+' · '+('开机启动' if unit.get('UnitFileState')=='enabled' else '未启用开机启动')))
+    if kind == 'cliproxyapi' and data.get('certificate'): rows.append(('证书有效期', data['certificate']))
     if data.get('certificate_expiry'):rows.append(('证书有效期',data['certificate_expiry']))
     return rows

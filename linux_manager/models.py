@@ -16,6 +16,7 @@ SERVICES = {
     "reality": ("VLESS + REALITY + Vision", ("linux-manager-xray.service",)),
     "xui": ("代理管理面板", ("x-ui.service",)),
     "nginx": ("Nginx 网页入口", ("nginx.service",)),
+    "cliproxyapi": ("CLIProxyAPI · AI 接口与管理后台", ("cli-proxy-api.service",)),
 }
 
 
@@ -108,7 +109,9 @@ class Redactor:
             text = text.replace(secret, "[已隐藏]")
         text = re.sub(r"(?<![\w])(?:\d{1,3}\.){3}\d{1,3}(?![\w])", "[服务器地址]", text)
         text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----", "[私钥已隐藏]", text)
-        text = re.sub(r"(?i)((?:password|passwd|token|secret|api[_-]?key|authorization)\s*[=:]\s*)[^\s,;]+", r"\1[已隐藏]", text)
+        text = re.sub(r"(?i)\bBearer\s+[^\s,;\"'<>]+", "Bearer [已隐藏]", text)
+        text = re.sub(r"(?i)([?&](?:code|state|oauth_code|authorization_code)=)[^&\s#]+", r"\1[已隐藏]", text)
+        text = re.sub(r"(?i)((?:password|passwd|token|secret|management[_-]?key|api[_-]?keys?|authorization)\s*[=:]\s*)[^\s,;]+", r"\1[已隐藏]", text)
         text = re.sub(r"(?:hysteria2|hy2|ss|vmess|vless|trojan)://\S+", "[连接信息已隐藏]", text)
         return text
 
@@ -179,7 +182,11 @@ class Store:
 
     def history(self) -> list[dict]:
         try:
-            return json.loads((self.directory / "history.json").read_text())[-200:]
+            rows = json.loads((self.directory / "history.json").read_text())
+            if not isinstance(rows, list):
+                return []
+            return [row for row in rows if isinstance(row, dict)
+                    and all(isinstance(row.get(field), str) and row[field] for field in ("task_id", "operation", "state"))][-200:]
         except (OSError, ValueError, TypeError):
             return []
 

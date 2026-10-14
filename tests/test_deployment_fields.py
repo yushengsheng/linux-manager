@@ -45,6 +45,7 @@ class DeploymentFieldsTests(unittest.TestCase):
             ("reality", {"port"}),
             ("xui", {"port", "username", "panel_password"}),
             ("nginx", {"port"}),
+            ("cliproxyapi", {"port", "management_key", "api_key"}),
             ("exchange", {"port"}),
         ]:
             with self.subTest(service=service):

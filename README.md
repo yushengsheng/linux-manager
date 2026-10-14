@@ -1,10 +1,12 @@
 # linux服务器管理
 
-在本机通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.12**。独立桌面包适用于 **macOS 11 或更新版本 / Apple Silicon（arm64）**；不含 Intel 或 Windows 桌面包。
+在 Mac 上通过界面连接、部署和维护 Linux 服务器，当前版本为 **v0.3.12**。桌面包适用于 **macOS 11 或更新版本 / Intel 与 Apple Silicon（universal2）**，不提供 Windows 包。
 
 ## 下载与更新
 
-从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-v0.3.12.zip`。解压后，将主程序和无终端启动器放在同一文件夹，双击 `启动linux服务器管理.app`。安装包自带 Python / Tk，无需安装开发环境；可用同页 `SHA256SUMS` 核对完整性。
+从 [GitHub Releases](https://github.com/yushengsheng/linux-manager/releases/latest) 下载 `linux-server-manager-macOS-universal2-v0.3.12.zip`，使用同页 `SHA256SUMS` 或同名 `.sha256` 核对。解压后正常退出旧程序，将主程序和启动器保留在同一文件夹，双击 `启动linux服务器管理.app`。
+
+安装包自带 Python / Tk 和依赖，无需开发环境，可整组移动目录或复制到其他 Mac。登录档案与客户端设置分别属于每台 Mac，新电脑需要自己的连接资料。本地交付目录为 `新版v0.3.12-Mac通用/`；开发时可使用根目录 `启动本地最新版.app`。
 
 先正常退出旧程序再打开新版。沿用原本机档案、私钥及钥匙串，不需要重新添加服务器；新版可能需要再次允许访问钥匙串。本包使用临时签名，未经过 Apple 开发者公证：确认下载来源和校验值后，如系统拦截，按 macOS「隐私与安全性」的提示允许打开，不要关闭系统安全检查。
 
@@ -36,11 +38,29 @@ v0.3.12 将全部项目发行包改为 Linux 服务器直接下载并校验 SHA-
 
 详细用法见 [使用说明](linux服务器管理使用说明.md)，验证结果见 [测试记录](linux服务器管理测试记录.md)。自动部署支持 Ubuntu 24.04、Debian 12/13；交易系统支持 x86_64。云平台安全组需自行放行对应端口。
 
+## CLIProxyAPI
+
+新增 CLIProxyAPI v8 安装、HTTPS 后台、独立管理／客户端 Key、每 30 分钟稳定版更新、每日备份及失败恢复。安装和更新保留现有上游授权、Key 与配置；授权期间不提交维护任务或自动更新核心。
+
+登录请从「应用管理 → 运行与备份」选择 CLIProxyAPI：直接登录 Codex／Antigravity，或在下拉框选择 Claude、Devin、Kimi 国内／国际、xAI、Muse (Meta)。macOS 按应用标识定位 Google Chrome，支持个人应用目录和移动后的安装位置；普通打开授权页无需控制 Chrome 的自动化权限，失败时使用系统默认浏览器。回调自动经已信任 SSH 转交服务器，不用复制网址或本机 Token。设备授权无需回调端口，端口占用不抢占。Vertex JSON、API Key 与插件仍使用官方后台。
+
+授权失败或取消会释放本机接收器和界面；服务器暂时不可达时保留原始错误，再次登录先按原会话编号重试清理。服务器已结束或过期的会话可重复取消，临时文件／专属端口保护规则清理失败会在下次登录重试；其他电脑尚在进行的授权不会被取消。关闭旧网页后重新发起登录。
+
+Codex、Antigravity 已在测试服务器实际保存并识别授权，其余方式的验证范围见[测试记录](linux服务器管理测试记录.md)。一般只授权一次，核心更新不删除授权；账号撤销、凭据失效或上游改变协议仍可能要求重新登录，不能保证永久兼容未知新版本。
+
+在同一页面的「本机客户端 · 配置与恢复」可一键配置 GPT / Codex、Claude Code、Pi、OpenCode。自动读取所选服务器当前有效客户端 Key，通过本机 HTTPS 验证模型目录，选择默认模型后先备份再写入本机配置和可选模型列表；GPT 可在 App 模型下拉框切换，Pi 可在 `/model` 切换，OpenCode 使用 `/models`。不安装客户端、不修改服务器或上游账号。Claude 入口适用于 Claude Code 命令行。配置后完全退出并重开客户端，新建会话验证；服务器增加模型后再次一键配置以刷新列表。
+
+点击「选择已安装应用」，从图标列表选择这台 Mac 的 GPT / Codex 或 OpenCode；程序按应用标识自动定位当前用户的配置，不需要选择路径。支持系统／个人应用程序目录、一层分组及通过 macOS 元数据识别移动过的应用；应用安装位置与配置目录互相独立。保留已知环境变量和历史自定义目录记录。Claude Code、Pi 命令行版直接使用原有一键配置按钮，程序自动定位；Claude 桌面聊天应用不会误识别为 Claude Code。
+
+「恢复原客户端配置」按客户端选择首次配置前或任意历史版本；恢复前另存当前配置，失败自动撤回。备份仅存本机管理器数据目录的 `client-config-backups`，可在服务器离线时恢复；恢复会覆盖相关配置文件中的后续设置，原本不存在的文件会删除。具体路径及配置兼容限制见[使用说明](linux服务器管理使用说明.md)。
+
+可用 `启动本地最新版.app` 加载当前源码，或使用 `新版v0.3.12-Mac通用/` 本地通用包。
+
 ## 本地运行和测试
 
-开发期间直接双击项目根目录的 `启动本地最新版.app`。它使用本机已配置的 Python 3.11 / Tk，直接读取同目录最新源码，无终端窗口；沿用原桌面版档案、加密私钥和本机钥匙串。正常退出旧程序后再打开，修改代码后重启即可，不需要重新打包。先测试，确认稳定后才生成正式安装包。
+开发期间直接双击项目根目录的 `启动本地最新版.app`。它自动寻找本机可用的 Python 3.11 或更新版本（需要 Tk 和 segno），支持项目虚拟环境、uv、Homebrew 和 Python.org 安装；可用 `LINUX_MANAGER_PYTHON` 指定运行环境，不绑定用户名或 CPU 架构。它直接读取同目录最新源码，无终端窗口；沿用原桌面版档案、加密私钥和本机钥匙串。正常退出旧程序后再打开，修改代码后重启即可，不需要重新打包。先测试，确认稳定后才生成正式安装包。
 
-此入口依赖这台 Mac 的源码目录及运行环境，不能单独分发给其他电脑。独立 `.app` 与 ZIP 留到确认版本没问题后再构建。
+此入口依赖这台 Mac 的源码目录及运行环境，不能单独分发给其他电脑。当前独立通用 `.app` 与 ZIP 位于上面的本地交付目录，分发时使用该包。
 
 使用安装了 Tk 的 Python 3.11 或更新版本（本轮回归使用 Python 3.11 / Tk 9）：
 
@@ -58,7 +78,9 @@ python3 tools/run_tests.py
 python3 tools/build_desktop.py
 ```
 
-构建工具使用隔离环境及固定的打包依赖，输出到 `/private/tmp/linux-manager-build/dist/`。生成的 `linux服务器管理.app` 可直接双击打开；原生程序元数据同步源码版本，构建后重新签名并核验。本次公开包仅在 macOS / arm64 构建与验收。
+构建工具使用隔离环境及固定的打包依赖，输出到 `/private/tmp/linux-manager-build/dist/`。生成的 `linux服务器管理.app` 可直接双击打开；原生程序元数据同步源码版本，构建后重新签名并核验。本版 Mac 包使用 universal2 构建，已在 Apple Silicon 上完成 arm64 原生与 x86_64（Rosetta）验收；尚未在 Intel 实体机验证。
+
+使用带 Intel／Apple Silicon 双架构的 universal2 Python 和 Tk，可执行 `python3 tools/build_desktop.py --target-arch universal2` 构建通用 Mac 包，输出到 `/private/tmp/linux-manager-build-universal2/dist/`。单架构运行环境会在构建前明确拒绝通用包，避免把 arm64 包误标为兼容 Intel。此入口不发布到 GitHub。
 
 如需同文件夹的无终端启动器，在 macOS 中执行：
 
@@ -67,3 +89,7 @@ osacompile -o 启动linux服务器管理.app scripts/启动linux服务器管理.
 ```
 
 把启动器与主程序放在同一文件夹。仓库不包含本机登录资料、私钥、运行数据或历史安装包。
+
+通用主程序构建完成并整理好交付目录后，执行 `python3 tools/package_desktop.py` 生成标准 UTF-8 ZIP 和 SHA-256，保留执行权限及框架链接。
+
+本地安装包验收：`python3 tools/final_release_audit.py`。此工具不读取用户连接档案、不访问真实服务器，会核对当前源码摘要、签名、双架构环境自检、ZIP 内容及 SHA-256。`tools/publish_desktop.py` 是依赖旧开发窗口状态的本机替换工具，不作为当前通用包的打包或发版入口。

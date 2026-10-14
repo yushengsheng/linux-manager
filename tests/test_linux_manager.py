@@ -41,6 +41,47 @@ class MemoryVault:
         self.items.pop(identifier, None)
 
 
+class HistoryFormatTests(unittest.TestCase):
+    def test_invalid_history_shapes_cannot_break_password_recovery_or_task_reads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(Path(folder), MemoryVault())
+            for value in ("invalid-record", [123], [None], [{}], {"rows": []}):
+                original = json.dumps(value)
+                path = Path(folder) / "history.json"
+                path.write_text(original)
+                self.assertEqual(store.history(), [])
+                self.assertEqual(Controller(store).saved_password_tasks(Connection(host="fixture.invalid")), {"tasks": []})
+                self.assertEqual(path.read_text(), original)
+
+    def test_valid_history_rows_survive_other_corrupt_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(Path(folder), MemoryVault())
+            valid = {"task_id": "a" * 24, "operation": "updates", "state": "succeeded"}
+            (Path(folder) / "history.json").write_text(json.dumps([None, valid, {"server_id": "broken"}, "invalid"]))
+            self.assertEqual(store.history(), [valid])
+
+
+class ConfigurationRestoreScopeTests(unittest.TestCase):
+    def test_project_restore_and_its_rollback_do_not_reload_ssh_or_change_firewall(self):
+        for service in ("hysteria2", "reality", "xui", "nginx"):
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                original = "a" * 24; current = "b" * 24
+                backup = root / "tasks" / original / "backup"; backup.mkdir(parents=True)
+                (backup.parent / "status.json").write_text(json.dumps({"state": "succeeded"}))
+                (backup / "manifest.json").write_text(json.dumps({"paths": [], "extra": {"service": service, "firewall_active": False}}))
+                task = root / "tasks" / current; task.mkdir()
+                with mock.patch.object(REMOTE, "ROOT", root), mock.patch.object(REMOTE, "TASK", task), mock.patch.object(REMOTE, "step"), mock.patch.object(REMOTE, "arm_recovery"), mock.patch.object(REMOTE, "firewall_snapshot", return_value={"active": True}), mock.patch.object(REMOTE, "unit_info", return_value={"LoadState": "loaded"}), mock.patch.object(REMOTE, "command") as command:
+                    result = REMOTE.configuration_restore({"backup_id": original})
+                    self.assertEqual(result["restored"], service)
+                    manifest = json.loads((task / "backup/manifest.json").read_text())
+                    self.assertTrue(manifest["extra"]["deployment"])
+                    REMOTE.restore_files(current)
+                commands = [call.args[0] for call in command.call_args_list]
+                self.assertTrue(any(args[:2] == ["systemctl", "restart"] for args in commands))
+                self.assertFalse(any("ssh.service" in args or "ssh.socket" in args or args[0] == "ufw" for args in commands))
+
+
 class ReleaseSelectionTests(unittest.TestCase):
     def setUp(self):
         patch = mock.patch("linux_manager.releases.github_cli", return_value=None)

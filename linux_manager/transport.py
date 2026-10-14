@@ -38,19 +38,30 @@ def interruptible_ssh(args, *, cancel_event, timeout, **kwargs):
     payload = kwargs.pop("input")
     deadline = time.monotonic() + timeout
     with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs) as process:
-        while True:
+        completed = threading.Event()
+        output = []
+        errors = []
+        def communicate():
+            try:
+                output.append(process.communicate(input=payload))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                completed.set()
+        worker = threading.Thread(target=communicate, daemon=True)
+        worker.start()
+        while not completed.wait(0.1):
             if cancel_event.is_set() or time.monotonic() >= deadline:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                worker.join(timeout=2)
                 if cancel_event.is_set():
                     raise WaitingStopped("已停止本机等待。Linux 已收到的后台任务继续执行，请在操作记录中查看；勿重复安装。")
                 raise subprocess.TimeoutExpired(args, timeout)
-            try:
-                stdout, stderr = process.communicate(input=payload, timeout=min(0.25, max(0.01, deadline - time.monotonic())))
-                return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
-            except subprocess.TimeoutExpired:
-                payload = None
+        if errors:
+            raise errors[0]
+        stdout, stderr = output[0]
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 BOOTSTRAP = "import sys,json,base64; lines=sys.stdin.read().splitlines(); packet=next(x[10:] for x in lines if x.startswith('LMREQUEST:')); e=json.loads(base64.b64decode(packet)); scope={'__name__':'linux_manager_remote','REQUEST':e['request'],'AGENT_SOURCE':e['agent'],'SSH_CONTEXT':sys.argv[1] if len(sys.argv)>1 else ''}; exec(compile(e['agent'],'<linux-manager-agent>','exec'),scope)"
 
@@ -196,6 +207,9 @@ class SSH:
         source = source.replace("#LM_BUNDLED_REALITY#", "LM_REALITY_SOURCE = " + repr(Path(__file__).with_name("reality.py").read_text()))
         source = source.replace("#LM_BUNDLED_REDEPLOYMENT#", "LM_REDEPLOYMENT_SOURCE = " + repr(Path(__file__).with_name("redeployment.py").read_text()))
         source = source.replace("#LM_BUNDLED_UNINSTALLATION#", "LM_UNINSTALLATION_SOURCE = " + repr(Path(__file__).with_name("uninstallation.py").read_text()))
+        source = source.replace("#LM_BUNDLED_CLIPROXYAPI#", "LM_CLIPROXYAPI_SOURCE = " + repr(Path(__file__).with_name("cliproxyapi.py").read_text()))
+        source = source.replace("#LM_BUNDLED_OAUTH_CONTRACT#", "LM_OAUTH_CONTRACT_SOURCE = " + repr(Path(__file__).with_name("oauth_contract.py").read_text()))
+        source = source.replace("#LM_BUNDLED_CLIPROXY_OAUTH#", "LM_CLIPROXY_OAUTH_SOURCE = " + repr(Path(__file__).with_name("cliproxy_oauth.py").read_text()))
         envelope = json.dumps({"agent": source, "request": request}, ensure_ascii=False).encode()
         # Passwords and the complete request are never command-line arguments.
         payload = (self.connection.sudo_password or self.connection.password) + "\nLMREQUEST:" + base64.b64encode(envelope).decode() + "\n"

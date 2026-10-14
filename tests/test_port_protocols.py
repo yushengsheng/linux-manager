@@ -160,7 +160,7 @@ class PortProtocolUITests(unittest.TestCase):
         app = self.app
         app.current = Connection(host="fixture.invalid")
         app.controller = mock.Mock()
-        app.controller.deployment_preview.return_value = {"version": "v1.2.3", "fingerprint": "fixture", "action": "reconfigure", "installed": True, "changes": []}
+        app.controller.deployment_preview.return_value = {"version": "v1.2.3", "fingerprint": "fixture", "action": "reconfigure", "installed": True, "changes": [], "panel_version": "v1.26.2", "auto_update": True, "host": "fixture.invalid", "port": 12345}
         app._execute = mock.Mock()
         app._run = mock.Mock(side_effect=lambda work, done, message, **kwargs: done(work()))
         for service, protocol in SERVICE_PROTOCOLS.items():

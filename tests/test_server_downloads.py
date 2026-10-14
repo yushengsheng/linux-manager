@@ -145,6 +145,12 @@ class ServerDownloadTests(unittest.TestCase):
 
 
 class StopWaitingTests(unittest.TestCase):
+    def test_slow_reader_receives_whole_large_request_after_wait_intervals(self):
+        payload = "large request " * 100000
+        result = interruptible_ssh([sys.executable, "-c", "import sys,time; time.sleep(.4); s=sys.stdin.read(); print(len(s))"], cancel_event=threading.Event(), timeout=5, input=payload, text=True, start_new_session=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(int(result.stdout), len(payload))
+
     def test_stalled_local_ssh_can_be_interrupted_and_reaped(self):
         cancel = threading.Event()
         timer = threading.Timer(0.15, cancel.set); timer.start()

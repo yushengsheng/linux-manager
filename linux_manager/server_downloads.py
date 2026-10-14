@@ -11,7 +11,9 @@ import urllib.parse
 import urllib.request
 
 REPOSITORIES = {"exchange": "yushengsheng/xiaojun-bn", "hysteria2": "SagerNet/sing-box",
-                "reality": "XTLS/Xray-core", "xui": "MHSanaei/3x-ui"}
+                "reality": "XTLS/Xray-core", "xui": "MHSanaei/3x-ui",
+                "cliproxyapi": "router-for-me/CLIProxyAPI",
+                "cliproxyapi-panel": "router-for-me/Cli-Proxy-API-Management-Center"}
 MAX_SIZE = 100 * 1024 * 1024
 
 
@@ -144,7 +146,8 @@ def download_release(service, version, architecture, destination, progress=lambd
     release = release_info(service, version)
     arch = {"x86_64": "amd64", "aarch64": "arm64"}[architecture]
     name = {"exchange": f"xiaojun-bn-{version}-linux-amd64.tar.gz", "hysteria2": f"sing-box-{version[1:]}-linux-{arch}.tar.gz",
-            "reality": "Xray-linux-" + {"amd64": "64", "arm64": "arm64-v8a"}[arch] + ".zip", "xui": f"x-ui-linux-{arch}.tar.gz"}[service]
+            "reality": "Xray-linux-" + {"amd64": "64", "arm64": "arm64-v8a"}[arch] + ".zip", "xui": f"x-ui-linux-{arch}.tar.gz",
+            "cliproxyapi": f"CLIProxyAPI_{version[1:]}_linux_{'aarch64' if architecture == 'aarch64' else 'amd64'}.tar.gz"}[service]
     assets = [a for a in release["assets"] if a.get("name") == name]
     require(len(assets) == 1, "官方发行版缺少唯一的当前架构安装包。")
     repository = REPOSITORIES[service]
@@ -152,7 +155,7 @@ def download_release(service, version, architecture, destination, progress=lambd
         require(any(a.get("name") == "install-linux.sh" and a.get("browser_download_url") == f"https://github.com/{repository}/releases/download/{version}/install-linux.sh" for a in release["assets"]), "官方发行版缺少 Linux 安装器。")
     expected = str(assets[0].get("digest") or "").removeprefix("sha256:")
     if not re.fullmatch(r"[a-fA-F0-9]{64}", expected):
-        checksum_names = {"SHA256SUMS", f"sing-box-{version[1:]}-checksums.txt"}
+        checksum_names = {"SHA256SUMS", f"sing-box-{version[1:]}-checksums.txt", "checksums.txt"}
         checksums = [a for a in release["assets"] if a.get("name") in checksum_names]
         require(len(checksums) == 1, "官方发行包缺少可验证的 SHA-256 校验信息。")
         checksum_file = Path(destination).with_suffix(".sha256")
@@ -166,6 +169,21 @@ def download_release(service, version, architecture, destination, progress=lambd
     try:
         actual = download_asset(repository, version, assets[0], destination, progress)
         require(actual == expected.lower(), "官方发行包 SHA-256 校验失败，文件未被执行。")
+        return actual
+    except Exception:
+        Path(destination).unlink(missing_ok=True)
+        raise
+
+
+def download_panel(version, destination):
+    release = release_info("cliproxyapi-panel", version)
+    assets = [a for a in release["assets"] if a.get("name") == "management.html"]
+    require(len(assets) == 1, "官方管理页面发行文件不唯一。")
+    expected = str(assets[0].get("digest") or "").removeprefix("sha256:")
+    require(re.fullmatch(r"[a-fA-F0-9]{64}", expected), "官方管理页面缺少 SHA-256，未替换。")
+    try:
+        actual = download_asset(REPOSITORIES["cliproxyapi-panel"], version, assets[0], destination, lambda *args: None, maximum=20 * 1024 * 1024)
+        require(actual == expected.lower(), "管理页面 SHA-256 校验失败。")
         return actual
     except Exception:
         Path(destination).unlink(missing_ok=True)

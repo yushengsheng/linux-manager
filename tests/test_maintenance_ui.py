@@ -64,5 +64,15 @@ class MaintenancePageTests(unittest.TestCase):
             app._node_qr_clicked(SimpleNamespace(x=1,y=1))
         app._show_node_qr.assert_called_once_with(value)
 
+    def test_manual_ai_update_confirmation_describes_upgrade_and_interruption(self):
+        app = self.app
+        app.manage_choice.set(SERVICES['cliproxyapi'][0])
+        app._execute = mock.Mock()
+        app._service('check_update')
+        params, description = app._execute.call_args.args
+        self.assertEqual(params['action'], 'check_update')
+        self.assertIn('下载并升级', description)
+        self.assertIn('短暂中断', description)
+
 
 if __name__=='__main__':unittest.main()

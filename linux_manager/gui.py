@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, font, messagebox, ttk
+from tkinter import filedialog, font, messagebox, simpledialog, ttk
 import urllib.parse
 import webbrowser
 
@@ -27,6 +27,9 @@ from .key_info import encrypted_key
 from .project_info import server_key, credential_alias, SERVICE_PROTOCOLS, deployment_network_hint
 from .qr import is_node_link, qr_png
 from .transport import WaitingStopped
+from .oauth_contract import OAUTH_PROVIDERS
+from .client_config import CLIENTS, ClientConfigurator, chat_models, gateway_connection, gateway_models
+from .client_apps import installed_applications, resolve_application
 
 BASE = Path(__file__).resolve().parents[1]
 BG = "#f4f6fa"
@@ -86,6 +89,7 @@ class App(tk.Tk):
         self.report = None
         self.busy = False
         self.events = queue.Queue()
+        self._worker_contexts = []
         self.controller.connection_listener = lambda state: self.events.put(("connection", state, None))
         self.buttons = []
         self.sessions = {}
@@ -161,11 +165,11 @@ class App(tk.Tk):
         self.deploy_choice.set(SERVICES["exchange"][0]); self._deploy_defaults()
         self.notebook.select(self.pages["安全防护"]); self.update_idletasks()
         result["custom_settings_initially_collapsed"] = not self.custom_security_frame.winfo_manager()
-        before = [v.get() for v in [self.plan_retire, self.plan_block, self.plan_fail2ban, self.plan_updates, self.auth_tries, self.login_grace, self.alive_interval]]
+        before = [v.get() for v in [self.plan_retire, self.plan_fail2ban, self.plan_updates, self.auth_tries, self.login_grace, self.alive_interval]]
         self._toggle_custom_security(); self.update_idletasks()
         result["custom_settings_expand"] = bool(self.custom_security_frame.winfo_ismapped())
         self._toggle_custom_security(); self.update_idletasks()
-        result["custom_settings_preserve_values"] = before == [v.get() for v in [self.plan_retire, self.plan_block, self.plan_fail2ban, self.plan_updates, self.auth_tries, self.login_grace, self.alive_interval]]
+        result["custom_settings_preserve_values"] = before == [v.get() for v in [self.plan_retire, self.plan_fail2ban, self.plan_updates, self.auth_tries, self.login_grace, self.alive_interval]]
         result["green_check_indicator"] = self._check_images[1].get(8, 13) == (22, 163, 74)
         for name, widget in [("preset_button_visible", self.plan_apply.button), ("custom_toggle_visible", self.custom_security_toggle.button)]:
             canvas = self.pages["安全防护"].canvas
@@ -735,20 +739,20 @@ class App(tk.Tk):
         self._button(preset, "生成密码", lambda: self._generate_password(self.plan_password)).grid(row=2, column=2, sticky="w", padx=12)
         self._button(preset, "生成口令", lambda: self._generate_password(self.plan_phrase, private_key=True)).grid(row=3, column=2, sticky="w", padx=12)
         self.plan_retire = tk.BooleanVar(value=True)
-        self.plan_block = tk.BooleanVar(value=True)
         self.plan_fail2ban = tk.BooleanVar(value=True)
         self.plan_updates = tk.BooleanVar(value=True)
         self.plan_checks = {}
         options = ttk.Frame(preset)
         options.grid(row=4, columnspan=3, sticky="ew", pady=(8, 0))
         options.columnconfigure(0, weight=1); options.columnconfigure(1, weight=1)
-        for i, (label, variable) in enumerate([("验证后撤销原档案旧钥匙", self.plan_retire), ("新增后禁止原账号登录", self.plan_block), ("方案中启用防猜密码保护", self.plan_fail2ban), ("方案中启用自动安全更新", self.plan_updates)]):
+        for i, (label, variable) in enumerate([("验证后撤销原档案旧钥匙", self.plan_retire), ("方案中启用防猜密码保护", self.plan_fail2ban), ("方案中启用自动安全更新", self.plan_updates)]):
             check = self._check(options, label, variable)
             check.grid(row=i // 2, column=i % 2, sticky="w", pady=3, padx=(0, 20))
             self.plan_checks[label] = check.checkbox
-        self.plan_hint = ttk.Label(preset, text="修改当前普通管理员；填写相同名字时，只更换加密密钥。", style="Muted.TLabel", wraplength=930)
+        self.plan_hint = ttk.Label(preset, text="修改当前普通管理员，并全局禁止 SSH 密码登录；名称相同则保留用户名。", style="Muted.TLabel", wraplength=930)
         self.plan_hint.grid(row=5, columnspan=3, sticky="w", pady=(6, 4))
-        ttk.Label(preset, text="仅允许密钥登录 · 私钥与口令仅存本机 · 保留端口与现有地址规则", style="Muted.TLabel", wraplength=930).grid(row=6, columnspan=3, sticky="w", pady=(0, 6))
+        self.plan_policy_hint = ttk.Label(preset, text="私钥与口令仅存本机 · 保留端口与现有地址规则", style="Muted.TLabel", wraplength=930)
+        self.plan_policy_hint.grid(row=6, columnspan=3, sticky="w", pady=(0, 6))
         self.plan_apply = self._button(preset, "预览并应用一键安全方案", self._apply_security_plan, True)
         self.plan_apply.grid(row=7, columnspan=2, sticky="w", pady=(0, 3))
         custom_header = ttk.Frame(page, padding=(0, 8, 0, 8)); custom_header.pack(fill="x")
@@ -796,8 +800,10 @@ class App(tk.Tk):
         if event is not None:
             self.plan_username.set(self.current.username if self.current and not create and self.current.username != "root" else "")
         self.plan_checks["验证后撤销原档案旧钥匙"].configure(state="disabled" if create or not self.current or self.current.auth != "key" else "normal")
-        self.plan_checks["新增后禁止原账号登录"].configure(state="normal" if create else "disabled")
-        self.plan_hint.configure(text="创建独立管理员与加密密钥，验证后保存为另一条本机档案。" if create else "修改当前普通管理员；填写相同名字时，只更换加密密钥。")
+        for label in ("方案中启用防猜密码保护", "方案中启用自动安全更新"):
+            self.plan_checks[label].configure(state="disabled" if create else "normal")
+        self.plan_hint.configure(text="仅新管理员使用密钥登录；原账号与其他账号的登录方式保持不变。" if create else "修改当前普通管理员，并全局禁止 SSH 密码登录；名称相同则保留用户名。")
+        self.plan_policy_hint.configure(text="新增模式不调整全局防猜密码保护或自动更新 · 私钥与口令仅存本机" if create else "验证新密钥后，全局禁止密码及超级管理员直接登录 · 保留端口与现有地址规则")
 
     def _deployment_page(self):
         page = self.pages["一键部署"].content
@@ -813,6 +819,8 @@ class App(tk.Tk):
         self.deploy_backend = tk.StringVar(value="18880")
         self.deploy_username = tk.StringVar(value="manager")
         self.deploy_password = tk.StringVar()
+        self.deploy_api_key = tk.StringVar()
+        self.deploy_auto_update = tk.BooleanVar(value=True)
         self.deploy_server_name = tk.StringVar(value="www.cloudflare.com")
         self.version_mode = tk.StringVar(value=LATEST_STABLE)
         self.deploy_version = tk.StringVar(value="部署前自动获取")
@@ -822,6 +830,8 @@ class App(tk.Tk):
             ("username", "面板账号（代理面板）", self.deploy_username, True),
             ("proxy_password", "服务密码（代理服务）", self.deploy_password, True),
             ("panel_password", "面板密码", self.deploy_password, True),
+            ("management_key", "管理 Key（后台登录）", self.deploy_password, True),
+            ("api_key", "客户端 API Key", self.deploy_api_key, True),
         ], start=1):
             row = ttk.Frame(form); row.grid(row=index, column=0, columnspan=2, sticky="w")
             row.columnconfigure(0, minsize=190)
@@ -831,6 +841,8 @@ class App(tk.Tk):
                 self.deploy_port_protocol.grid(row=0, column=2, sticky="w", padx=12)
             if name.endswith("password"):
                 self._button(row, "生成密码", lambda: self._generate_password(self.deploy_password)).grid(row=0, column=2, padx=12)
+            if name in {"management_key", "api_key"}:
+                self._button(row, "生成 Key", lambda v=variable: self._generate_password(v)).grid(row=0, column=2, padx=12)
             self.deploy_rows[name] = row
         self.deploy_optional_open = False
         self.deploy_optional_header = ttk.Frame(page)
@@ -842,7 +854,7 @@ class App(tk.Tk):
         self.deploy_optional_rows = {}
         for index, (name, label, variable, private) in enumerate([
             ("host", "访问域名（可留空）", self.deploy_host, True),
-            ("backend", "内部端口（交易系统）", self.deploy_backend, False),
+            ("backend", "内部端口", self.deploy_backend, False),
             ("server_name", "REALITY 目标域名", self.deploy_server_name, False),
         ]):
             row = ttk.Frame(self.deploy_optional_frame); row.grid(row=index, column=0, sticky="w")
@@ -851,6 +863,9 @@ class App(tk.Tk):
             if name == "backend":
                 ttk.Label(row, text="TCP · 仅本机，不向公网开放", style="Muted.TLabel").grid(row=0, column=2, sticky="w", padx=12)
             self.deploy_optional_rows[name] = row
+        auto_row = ttk.Frame(self.deploy_optional_frame); auto_row.grid(row=5, column=0, sticky="w")
+        ttk.Checkbutton(auto_row, text="CLIProxyAPI 自动更新核心和管理页面（每 30 分钟）", variable=self.deploy_auto_update).pack(anchor="w")
+        self.deploy_optional_rows["auto_update"] = auto_row
         version_row = ttk.Frame(self.deploy_optional_frame); version_row.grid(row=3, column=0, sticky="w")
         version_row.columnconfigure(0, minsize=190)
         self.deploy_optional_rows["version_mode"] = version_row
@@ -911,7 +926,28 @@ class App(tk.Tk):
         row = ttk.Frame(page); row.pack(fill="x", pady=18)
         for title, action in [("启动", "start"), ("停止", "stop"), ("重启", "restart"), ("开启开机启动", "enable"), ("关闭开机启动", "disable")]:
             self._button(row, title, lambda a=action: self._service(a)).pack(side="left", padx=(0, 9))
-        removal = ttk.Frame(page); removal.pack(fill="x", pady=(0, 8))
+        self.ai_maintenance = ttk.Frame(page)
+        for title, action in [("检查并更新 AI", "check_update"), ("开启 AI 自动更新", "enable_update"), ("关闭 AI 自动更新", "disable_update"), ("回滚 AI 核心", "rollback_core")]:
+            self._button(self.ai_maintenance, title, lambda a=action: self._service(a)).pack(side="left", padx=(0, 9))
+        self.ai_oauth = ttk.Frame(page)
+        for title, provider in [("登录 Codex", "codex"), ("登录 Antigravity", "antigravity")]:
+            self._button(self.ai_oauth, title, lambda p=provider: self._oauth(p)).pack(side="left", padx=(0, 9))
+        self.oauth_choices = {spec['label']: name for name, spec in OAUTH_PROVIDERS.items() if name not in {'codex', 'antigravity'}}
+        self.oauth_provider = tk.StringVar(value="Claude")
+        ttk.Combobox(self.ai_oauth, textvariable=self.oauth_provider, values=list(self.oauth_choices), state="readonly", width=16).pack(side="left", padx=(4, 9))
+        self._button(self.ai_oauth, "登录所选提供商", lambda: self._oauth(self.oauth_choices[self.oauth_provider.get()])).pack(side="left")
+        self.ai_clients = ttk.LabelFrame(page, text="本机客户端 · 配置与恢复", padding=12)
+        client_actions = ttk.Frame(self.ai_clients); client_actions.pack(fill="x")
+        for client, title in CLIENTS.items():
+            label = "一键配置 GPT" if client == "codex" else "一键配置 " + title
+            self._button(client_actions, label, lambda name=client: self._configure_local_client(name)).pack(side="left", padx=(0, 9))
+        restore_clients = ttk.Frame(self.ai_clients); restore_clients.pack(fill="x", pady=(10, 0))
+        self.local_client_choice = tk.StringVar(value=CLIENTS["codex"])
+        ttk.Combobox(restore_clients, textvariable=self.local_client_choice, values=list(CLIENTS.values()), state="readonly", width=19).pack(side="left", padx=(0, 9))
+        self._button(restore_clients, "恢复原客户端配置", self._restore_local_client).pack(side="left")
+        self._button(restore_clients, "选择已安装应用", self._choose_local_client_application).pack(side="left", padx=(9, 0))
+        ttk.Label(self.ai_clients, text="只配置这台电脑；自动备份，可恢复到首次配置前或任一历史版本。配置后需重启客户端。", style="Muted.TLabel", wraplength=920).pack(anchor="w", pady=(8, 0))
+        removal = ttk.Frame(page); self.maintenance_removal = removal; removal.pack(fill="x", pady=(0, 8))
         self._button(removal, "卸载所选项目", self._uninstall).pack(side="left")
         ttk.Label(removal, text="移除程序和专属服务，默认保留配置、账号及业务数据。", style="Muted.TLabel", wraplength=640).pack(side="left", padx=12)
         security = ttk.LabelFrame(page, text="安全与配置备份", padding=12); security.pack(fill="x", pady=8)
@@ -1143,9 +1179,9 @@ class App(tk.Tk):
             profiles = self.store.profiles()
             self.profile_load_stage = "project_credentials"
             for profile in profiles:
-                for kind in ["exchange", "hysteria2", "xui"]:
+                for kind in ["exchange", "hysteria2", "xui", "cliproxyapi"]:
                     self.store.vault.get(credential_alias(profile, kind))
-                    if kind in {"hysteria2", "xui"}:
+                    if kind in {"hysteria2", "xui", "cliproxyapi"}:
                         from .vault import vault_alias
                         self.store.vault.get(vault_alias("service-pending", credential_alias(profile, kind)))
             self.profile_load_stage = "key_metadata"
@@ -1224,9 +1260,19 @@ class App(tk.Tk):
                 else:
                     text = "操作未完成。已保留记录，请检查连接或查看任务状态。"
                 self.events.put(("stopped" if isinstance(error, WaitingStopped) else "error", text, None))
-        threading.Thread(target=work, daemon=True).start()
+        thread = threading.Thread(target=work, daemon=True)
+        # A worker may capture Tk Variables through dialog callbacks. Keep its
+        # closure until the UI thread reaps it, so their finalizers never run
+        # while threading.Thread deletes its target on the background thread.
+        self.__dict__.setdefault('_worker_contexts', []).append((thread, work))
+        thread.start()
+
+    def _reap_workers(self):
+        contexts = self.__dict__.get('_worker_contexts', [])
+        self._worker_contexts = [(thread, work) for thread, work in contexts if thread.is_alive()]
 
     def _drain(self):
+        self._reap_workers()
         latest_progress = None
         deadline = time.perf_counter() + 0.008
         def show_progress(value):
@@ -1240,6 +1286,9 @@ class App(tk.Tk):
                     continue
                 if kind == "progress":
                     latest_progress = value
+                    continue
+                if kind == "oauth_ready":
+                    callback(value)
                     continue
                 if latest_progress is not None:
                     show_progress(latest_progress); latest_progress = None
@@ -1385,7 +1434,7 @@ class App(tk.Tk):
         self.allow_password.set(password_enabled)
         self.allow_root.set("yes" in r["ssh"].get("permitrootlogin", []))
         service_rows = []
-        purposes = {"exchange": "币安多账号交易、资产查询和资金管理", "hysteria2": "Hysteria2 网络代理服务", "reality": "独立 VLESS + REALITY + Vision 节点", "xui": "代理账号与节点的网页管理", "nginx": "网页入口、HTTPS 和后端转发"}
+        purposes = {"exchange": "币安多账号交易、资产查询和资金管理", "hysteria2": "Hysteria2 网络代理服务", "reality": "独立 VLESS + REALITY + Vision 节点", "xui": "代理账号与节点的网页管理", "nginx": "网页入口、HTTPS 和后端转发", "cliproxyapi": "AI 接口转发、账号管理与自动更新"}
         for key, units in r["services"].items():
             installed = [u for u in units if u.get("LoadState") == "loaded"]
             state = "运行中" if any(u.get("ActiveState") == "active" for u in installed) else "已停止" if installed else "尚未安装"
@@ -1543,15 +1592,15 @@ class App(tk.Tk):
         except ManagerError as error:
             messagebox.showerror("检查方案输入", str(error), parent=self); return
         c = self.current
-        options = {"mode": mode, "username": target, "new_password": value, "key_passphrase": phrase, "retire_old_key": self.plan_retire.get(), "block_original": self.plan_block.get(), "fail2ban": self.plan_fail2ban.get(), "updates": self.plan_updates.get()}
-        steps = ["新增并验证普通管理员：" + target if mode == "create" else "修改当前账号为：" + target + "（名称相同则只更换密钥）", "生成加密私钥，私钥和口令仅存本机，并开启记住登录信息", "验证新密钥及 sudo 后，只允许 SSH 密钥登录，禁止密码和超级管理员直接登录", "保留 SSH 端口、现有地址规则及 SSH 隧道设置"]
+        options = {"mode": mode, "username": target, "new_password": value, "key_passphrase": phrase, "retire_old_key": mode == "rename" and self.plan_retire.get(), "fail2ban": mode == "rename" and self.plan_fail2ban.get(), "updates": mode == "rename" and self.plan_updates.get()}
+        steps = ["新增并验证普通管理员：" + target if mode == "create" else "修改当前账号为：" + target + "（名称相同则保留用户名）", "生成加密私钥，私钥和口令仅存本机，并开启记住登录信息", "验证新密钥及 sudo 后，仅新账号使用密钥登录，其他账号及全局登录策略保持不变" if mode == "create" else "验证新密钥及 sudo 后，全局禁止 SSH 密码、交互密码及超级管理员直接登录", "保留 SSH 端口、现有地址规则及 SSH 隧道设置"]
         if mode == "create": steps.append("新账号 sudo 密码：" + ("使用已填写的新密码" if value else "自动生成并保存到本机钥匙串"))
         elif value: steps.append("修改当前账号的系统密码")
         if mode == "rename" and options["retire_old_key"] and c.auth == "key": steps.append("验证后撤销当前档案原公钥；其他钥匙保留")
-        if mode == "create" and options["block_original"] and c.username != "root": steps.append("新账号验证成功后，禁止原账号 SSH 登录；账号和文件保留")
         if options["fail2ban"]: steps.append("启用临时封禁：10 分钟内失败 5 次，封禁 60 分钟")
         if options["updates"]: steps.append("启用系统安全更新，不自动重启")
-        if not messagebox.askyesno("预览一键安全方案", "\n".join("• " + s for s in steps) + "\n\n关闭密码入口会影响本机以外仍使用密码的管理工具。改名会关闭原账号的登录会话。\n每个连接变更分别验证和保护；后续步骤失败时，已完成步骤保留并列出结果。\n是否开始？", parent=self): return
+        impact = "仅调整新管理员的登录策略，保留原账号和其他账号的密码／密钥登录。" if mode == "create" else "全局关闭密码入口会影响仍使用密码的账号和管理工具。改名会关闭原账号的登录会话。"
+        if not messagebox.askyesno("预览一键安全方案", "\n".join("• " + s for s in steps) + "\n\n" + impact + "\n每个连接变更分别验证和保护；后续步骤失败时，已完成步骤保留并列出结果。\n是否开始？", parent=self): return
         def progress(status): self.events.put(("progress", status, None))
         def done(result):
             updated = result["connection"]
@@ -1733,7 +1782,7 @@ class App(tk.Tk):
 
     def _deploy_defaults(self, _=None):
         key = self._service_key(self.deploy_choice.get())
-        defaults = {"exchange": (26483, "部署前自动获取"), "hysteria2": (51752, "v1.14.2"), "reality": (443, "v26.3.27"), "xui": (2053, "v3.9.0"), "nginx": (80, "系统软件包")}
+        defaults = {"exchange": (26483, "部署前自动获取"), "hysteria2": (51752, "v1.14.2"), "reality": (443, "v26.3.27"), "xui": (2053, "v3.9.0"), "nginx": (80, "系统软件包"), "cliproxyapi": (9229, "部署前自动获取")}
         number, version = defaults[key]; self.deploy_port.set(str(number)); self.deploy_version.set(version)
         self.version_mode.set(LATEST_STABLE)
         current = self._deployment_current(key)
@@ -1743,6 +1792,11 @@ class App(tk.Tk):
             self.deploy_version.set(current.get("version") or "预览时读取现有版本")
             self.version_mode.set(KEEP_CURRENT)
             if key == "exchange": self.deploy_backend.set(str(current.get("backend_port", 18880)))
+            if key == "cliproxyapi":
+                self.deploy_backend.set(str(current.get("backend_port", 8317)))
+                self.deploy_password.set(self.store.vault.cache.get(credential_alias(self.current, key), {}).get("management_key", ""))
+                self.deploy_api_key.set(next(iter(current.get("api_keys", [])), ""))
+                self.deploy_auto_update.set(current.get("timers", {}).get("linux-manager-cliproxyapi-update.timer", {}).get("UnitFileState") == "enabled")
             if key == "reality": self.deploy_server_name.set(current.get("server_name", "www.cloudflare.com"))
             if key == "hysteria2": self.deploy_password.set(current.get("proxy_password", ""))
             if key == "xui":
@@ -1753,10 +1807,15 @@ class App(tk.Tk):
             self.deploy_host.set("")
             self.deploy_password.set("")
             self.deploy_username.set("manager")
-            self.deploy_backend.set("18880")
+            self.deploy_backend.set("8317" if key == "cliproxyapi" else "18880")
+            if key == "cliproxyapi":
+                self.deploy_password.set(secrets.token_urlsafe(32))
+                self.deploy_api_key.set(secrets.token_urlsafe(32))
+                self.deploy_auto_update.set(True)
             self.deploy_server_name.set("www.cloudflare.com")
         self._deployment_fields()
         hints = {"exchange": "确认 TCP 网页端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写 UDP 节点端口和服务密码；HY2 不使用 TCP 节点端口。已有项目会按新条件调整；原密码不变时可以留空。", "reality": "只填 TCP 节点端口；连接凭据自动生成，无需自有域名和证书。部署后在运行与备份复制 VLESS 节点链接，或点击二维码图标扫码导入。已有节点调整端口或版本时保留原凭据。", "xui": "填写 TCP 面板端口、面板账号和密码；节点端口另按各自协议放行。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
+        hints["cliproxyapi"] = "默认使用 IP＋HTTPS，无需域名。管理 Key 用于后台登录；客户端 Key 可供多设备共用。添加上游账号后才能调用模型。自动更新运行在服务器上。"
         self.deploy_hint.configure(text=hints[key])
 
     def _deployment_current(self, key):
@@ -1773,11 +1832,11 @@ class App(tk.Tk):
 
     def _deployment_fields(self):
         key = self._service_key(self.deploy_choice.get())
-        visible = {"exchange": {"port"}, "hysteria2": {"port", "proxy_password"}, "reality": {"port"}, "xui": {"port", "username", "panel_password"}, "nginx": {"port"}}[key]
+        visible = {"exchange": {"port"}, "hysteria2": {"port", "proxy_password"}, "reality": {"port"}, "xui": {"port", "username", "panel_password"}, "nginx": {"port"}, "cliproxyapi": {"port", "management_key", "api_key"}}[key]
         for name, row in self.deploy_rows.items():
             row.grid() if name in visible else row.grid_remove()
         for name, row in self.deploy_optional_rows.items():
-            shown = name == "host" and key != "nginx" or name == "backend" and key == "exchange" or name == "server_name" and key == "reality" or name == "version_mode"
+            shown = name == "host" and key != "nginx" or name == "backend" and key in {"exchange", "cliproxyapi"} or name == "server_name" and key == "reality" or name == "version_mode" or name == "auto_update" and key == "cliproxyapi"
             if name != "version":
                 row.grid() if shown else row.grid_remove()
         self.deploy_optional_header.pack(fill="x", pady=(14, 0), before=self.deploy_hint)
@@ -1812,7 +1871,7 @@ class App(tk.Tk):
         if automatic:
             self.deploy_version.set("部署前自动获取" if key != "nginx" else "预览时读取系统仓库版本")
         elif not keeping and key != "nginx" and not self.deploy_version.get().startswith("v"):
-            self.deploy_version.set({"exchange":"v1.1.85", "hysteria2":"v1.14.3", "reality":"v26.3.27", "xui":"v3.9.0"}[key])
+            self.deploy_version.set({"exchange":"v1.1.85", "hysteria2":"v1.14.3", "reality":"v26.3.27", "xui":"v3.9.0", "cliproxyapi":"v8.0.27"}[key])
         elif not keeping and key == "nginx" and self.deploy_version.get().startswith(("预览", "系统")):
             self.deploy_version.set("")
         if "deploy_optional_rows" in self.__dict__:
@@ -1827,6 +1886,10 @@ class App(tk.Tk):
             if key != "nginx" or self.version_mode.get() == SPECIFIC_VERSION: params["version"] = self.deploy_version.get().strip()
             if self.version_mode.get() == KEEP_CURRENT: params["version_policy"] = "keep"
             if key == "exchange": params["backend_port"] = validate_port(self.deploy_backend.get())
+            if key == "cliproxyapi":
+                params.update(backend_port=validate_port(self.deploy_backend.get()), auto_update=self.deploy_auto_update.get())
+                if self.deploy_password.get(): params["management_key"] = validate_password(self.deploy_password.get())
+                if self.deploy_api_key.get(): params["api_key"] = validate_password(self.deploy_api_key.get())
             if key == "reality": params["server_name"] = self.deploy_server_name.get().strip() or "www.cloudflare.com"
             existing = bool(self._deployment_current(key))
             if key == "hysteria2": params["proxy_password"] = validate_password(self.deploy_password.get()) if self.deploy_password.get() or not existing else ""
@@ -1846,6 +1909,8 @@ class App(tk.Tk):
             self.deploy_version.set(plan["version"])
             names = {"install":"首次安装", "reconfigure":"调整现有配置", "update":"切换软件版本", "repair":"保留数据并修复安装", "retry":"重新准备未完成的首次安装", "unchanged":"条件相同，无需重复安装"}
             lines = [SERVICES[params["service"]][0] + "：" + ("重新安装（沿用保留的数据）" if plan.get("reinstall") else names[plan["action"]]), "目标版本：" + plan["version"]]
+            if params["service"] == "cliproxyapi":
+                lines.extend(["管理页面版本：" + plan["panel_version"], "自动更新：" + ("开启（每 30 分钟检查）" if plan["auto_update"] else "关闭"), "后台：https://" + plan["host"] + ":" + str(plan["port"]) + "/management.html"])
             for item in plan["changes"]:
                 lines.append(item["name"] + "：" + str(item["before"] or "未设置") + " → " + str(item["after"]))
             if plan["installed"] and plan["action"] != "unchanged": lines.append("先备份原配置；保留现有账号、节点和业务数据。新配置验证失败时恢复原项目。")
@@ -1886,6 +1951,10 @@ class App(tk.Tk):
             if not messagebox.askyesno("确认维护条件", "请先在交易网页停止任务并确认撤单及清理完成。\n是否已经完成？", parent=self): return
             params["maintenance_confirmed"] = True
         description = "对“" + SERVICES[key][0] + "”执行所选服务管理操作。"
+        if key == "cliproxyapi" and action == "check_update":
+            description += "\n查询官方稳定版；发现新版后会备份、下载并升级核心和管理页面。升级重启会短暂中断模型请求，失败自动恢复原版本。"
+        if key == "cliproxyapi" and action == "rollback_core":
+            description += "\n恢复最近一次升级前的核心和页面，保留当前配置与授权；成功后关闭自动更新。"
         if key == "nginx":
             description += "\n仅操作 nginx.service 共享核心，会影响该核心下的其他网站；不操作交易系统的专属网页入口。"
         self._execute(params, description)
@@ -1920,7 +1989,7 @@ class App(tk.Tk):
         redactor = self._redactor()
         info = self.project_details.get((server_key(c),key), {})
         for name,value in info.get("rows",[]):
-            if any(word in name for word in ("密码", "初始化码", "节点", "订阅")):
+            if any(word in name for word in ("密码", "Key", "初始化码", "节点", "订阅")):
                 redactor.add(value)
         def done(data):
             text = redactor.text(data["logs"])
@@ -1933,6 +2002,15 @@ class App(tk.Tk):
         key = self._service_key(self.manage_choice.get())
         identity = server_key(self.current) if self.current else ""
         information = self.project_details.get((identity,key), {})
+        if "ai_maintenance" in self.__dict__:
+            if key == "cliproxyapi": self.ai_maintenance.pack(fill="x", pady=(0, 10), before=self.maintenance_removal)
+            else: self.ai_maintenance.pack_forget()
+        if "ai_oauth" in self.__dict__:
+            if key == "cliproxyapi": self.ai_oauth.pack(fill="x", pady=(0, 10), before=self.maintenance_removal)
+            else: self.ai_oauth.pack_forget()
+        if "ai_clients" in self.__dict__:
+            if key == "cliproxyapi": self.ai_clients.pack(fill="x", pady=(0, 10), before=self.maintenance_removal)
+            else: self.ai_clients.pack_forget()
         self.project_rows = list(information.get("rows", []))
         hidden = self.privacy.get()
         sync_tree(self.project_info_tree, [(str(i),(name,"已隐藏；关闭右上角隐藏开关可查看" if hidden and name not in {"项目状态","安装版本","端口协议"} else value, "▦" if is_node_link(value) else "")) for i,(name,value) in enumerate(self.project_rows)])
@@ -2004,9 +2082,240 @@ class App(tk.Tk):
         else:
             self.status.configure(text="所选项目没有网页入口；请复制节点或订阅链接使用。")
 
+    def _client_configurator(self):
+        return ClientConfigurator(self.store.directory / "client-config-backups")
+
+    def _choose_local_client_application(self):
+        if self.busy: return
+        self._run(installed_applications, self._local_client_application_dialog, "识别已安装的客户端应用…")
+
+    def _local_client_application_dialog(self, applications):
+        dialog = tk.Toplevel(self); dialog.title("选择已安装应用"); dialog.transient(self)
+        body = ttk.Frame(dialog, padding=20); body.pack(fill="both", expand=True)
+        ttk.Label(body, text="选择要配置的 App", style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(body, text="点击应用图标，程序自动识别当前用户的配置，无需选择路径。", wraplength=550).pack(anchor="w", pady=(8, 14))
+        grid = ttk.Frame(body); grid.pack(fill="both", expand=True)
+        dialog.icons = []
+        def select(application):
+            try:
+                current = resolve_application(application.path)
+                configurator = self._client_configurator()
+                directory = configurator.directories[current.client]
+                self.local_client_choice.set(CLIENTS[current.client])
+                self.status.configure(text="已选择 " + current.name + "；已自动定位本机配置：" + str(directory))
+                dialog.destroy()
+            except (ManagerError, OSError) as error:
+                messagebox.showerror("选择已安装应用", str(error) if isinstance(error, ManagerError) else "本机配置暂时无法识别，请刷新后重试。", parent=dialog)
+        for index, application in enumerate(applications):
+            icon = None
+            if application.icon:
+                try:
+                    icon = tk.PhotoImage(master=dialog, data=base64.b64encode(application.icon).decode())
+                    dialog.icons.append(icon)
+                except tk.TclError:
+                    pass
+            label = application.name
+            if sum(item.name == application.name for item in applications) > 1:
+                label += "\n" + ("系统安装" if application.path.parent == Path('/Applications') else "个人安装" if application.path.parent == Path.home() / 'Applications' else application.path.parent.name)
+            ttk.Button(grid, text=label if icon else "◎\n" + label, image=icon or "", compound="top", width=19,
+                       command=lambda item=application: select(item)).grid(row=index // 3, column=index % 3, padx=8, pady=10)
+        if not applications:
+            ttk.Label(grid, text="未发现支持配置的桌面客户端，请先安装 GPT / Codex 或 OpenCode，再刷新。", wraplength=550).pack(anchor="w", pady=12)
+        ttk.Label(body, text="Claude Code、Pi 命令行版使用原有一键配置按钮，程序会自动定位；Claude 桌面聊天应用不在此列表中。",
+                  wraplength=550, style="Muted.TLabel").pack(anchor="w", pady=(10, 14))
+        actions = ttk.Frame(body); actions.pack(fill="x")
+        self._button(actions, "刷新应用列表", lambda: (dialog.destroy(), self._choose_local_client_application()), track=False).pack(side="left")
+        self._button(actions, "取消", dialog.destroy, track=False).pack(side="right")
+
+    def _configure_local_client(self, client):
+        if self.busy or not self._ready(): return
+        c = self.current.changed()
+        def done(information):
+            if not self.current or server_key(self.current) != server_key(c) or self._service_key(self.manage_choice.get()) != "cliproxyapi":
+                self.status.configure(text="服务器或项目已切换，请重新配置客户端。")
+                return
+            self.project_details[(server_key(c), "cliproxyapi")] = information
+            self._project_changed()
+            try:
+                connection = gateway_connection(information)
+            except ManagerError as error:
+                messagebox.showerror("配置客户端", str(error), parent=self); return
+            self._local_client_dialog(client, c, connection)
+        self._run(lambda: self.controller.project_information(c, "cliproxyapi"), done, "读取所选服务器的接口地址和客户端 Key…")
+
+    def _local_client_dialog(self, client, connection, gateway):
+        try:
+            configurator = self._client_configurator()
+        except (ManagerError, OSError) as error:
+            messagebox.showerror("配置客户端", str(error) if isinstance(error, ManagerError) else "本机目录设置未能读取，请检查目录权限。", parent=self); return
+        dialog = tk.Toplevel(self); dialog.title("配置本机 · " + CLIENTS[client]); dialog.transient(self)
+        dialog.geometry("740x520"); dialog.minsize(700, 500)
+        frame = ttk.Frame(dialog, padding=20); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=CLIENTS[client] + " → " + connection.label, style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(frame, text=gateway["base_url"], wraplength=650).pack(anchor="w", pady=(8, 12))
+        key_labels = ["客户端 Key " + str(i + 1) for i in range(len(gateway["api_keys"]))]
+        key_choice = tk.StringVar(dialog, value=key_labels[0])
+        ttk.Label(frame, text="客户端 Key（使用服务器当前有效值）").pack(anchor="w")
+        key_box = ttk.Combobox(frame, textvariable=key_choice, values=key_labels, state="readonly", width=32); key_box.pack(anchor="w", pady=6)
+        ttk.Label(frame, text="默认模型").pack(anchor="w")
+        model = tk.StringVar(dialog)
+        model_box = ttk.Combobox(frame, textvariable=model, state="disabled", width=58); model_box.pack(anchor="w", pady=6)
+        hint = tk.StringVar(dialog, value="正在从这台电脑验证 HTTPS、客户端 Key 和模型目录…")
+        ttk.Label(frame, textvariable=hint, wraplength=650, justify="left").pack(anchor="w", pady=8)
+        ttk.Label(frame, text="将备份并修改：\n" + "\n".join(str(p) for p in configurator.paths(client)), style="Muted.TLabel", wraplength=650, justify="left").pack(anchor="w")
+        state = {"models": [], "key": None}
+        actions = ttk.Frame(frame); actions.pack(anchor="w", pady=12)
+        apply_button = self._button(actions, "备份并应用配置", lambda: apply(), track=False); apply_button.pack(side="left")
+        apply_button.configure(state="disabled")
+        self._button(actions, "取消", dialog.destroy, track=False).pack(side="left", padx=12)
+        def refresh(_=None):
+            if self.busy or not dialog.winfo_exists(): return
+            state.update(models=[], key=None); model.set(""); model_box.configure(state="disabled")
+            apply_button.configure(state="disabled"); key_box.configure(state="disabled")
+            index = key_labels.index(key_choice.get()); token = gateway["api_keys"][index]
+            def loaded(models):
+                if not dialog.winfo_exists(): return
+                state.update(models=models, key=token)
+                choices = chat_models(models)
+                if client == "claude":
+                    choices = [m for m in choices if "claude" in m.lower()]
+                if not choices:
+                    hint.set("服务器没有可用于 Claude Code 的 Claude 模型，请先在后台添加授权或模型。" if client == "claude" else "服务器没有可用于对话的模型，请先在后台添加授权或模型。")
+                    key_box.configure(state="readonly"); return
+                preferred = next((m for m in choices if "gpt" in m.lower()), choices[0]) if client != "claude" else choices[0]
+                model_box.configure(values=choices, state="readonly"); model.set(preferred)
+                hint.set("将配置模型发现及 Sonnet／Opus 别名，所选项作为默认模型。应用前请关闭客户端。" if client == "claude" else "将写入 " + str(len(chat_models(models))) + " 个对话模型；所选项仅作为默认模型，GPT 下拉框、Pi /model 可继续切换。应用前请关闭客户端。")
+                apply_button.configure(state="normal"); key_box.configure(state="readonly")
+            self._run(lambda: gateway_models(gateway["base_url"], token), loaded, "验证本机到服务器的客户端连接…")
+            def retry_controls():
+                if not dialog.winfo_exists(): return
+                if self.busy: self.after(100, retry_controls)
+                else: key_box.configure(state="readonly")
+            self.after(100, retry_controls)
+        def apply():
+            if self.busy or state["key"] is None: return
+            if gateway["api_keys"][key_labels.index(key_choice.get())] != state["key"]:
+                refresh(); return
+            if not self.current or server_key(self.current) != server_key(connection) or self._service_key(self.manage_choice.get()) != "cliproxyapi":
+                messagebox.showerror("配置客户端", "服务器或项目已切换，请重新打开配置窗口。", parent=dialog); return
+            selected_model = model.get(); token = state["key"]; models = list(state["models"])
+            def worker():
+                # Recheck the selected credential and model immediately before writing.
+                fresh = gateway_models(gateway["base_url"], token)
+                if selected_model not in fresh or selected_model not in models:
+                    raise ManagerError("服务器模型列表已改变；请重新选择模型。未改动本地配置。")
+                return configurator.configure(client, gateway["base_url"], token, selected_model, fresh)
+            def applied(result):
+                if dialog.winfo_exists(): dialog.destroy()
+                self.status.configure(text=CLIENTS[client] + " 本机配置已保存；重启客户端后使用。")
+                messagebox.showinfo("本机客户端已配置", CLIENTS[client] + " 已配置。\n请完全退出并重新打开客户端，新建会话验证模型调用。\n\n原配置备份：" + result["backup_id"] + "\n可使用「恢复原客户端配置」回退。", parent=self)
+            self._run(worker, applied, "备份并写入本机客户端配置…")
+        key_box.bind("<<ComboboxSelected>>", refresh)
+        self._button(actions, "重新读取模型", refresh, track=False).pack(side="left")
+        refresh()
+
+    def _restore_local_client(self):
+        if self.busy: return
+        client = next(name for name, title in CLIENTS.items() if title == self.local_client_choice.get())
+        try:
+            configurator = self._client_configurator()
+        except (ManagerError, OSError) as error:
+            messagebox.showerror("恢复客户端配置", str(error) if isinstance(error, ManagerError) else "本机目录设置未能读取，请检查目录权限。", parent=self); return
+        rows = configurator.backups_for(client)
+        if not rows:
+            messagebox.showinfo("恢复客户端配置", "这个客户端还没有本程序创建的配置备份。", parent=self); return
+        dialog = tk.Toplevel(self); dialog.title("恢复本机 · " + CLIENTS[client]); dialog.transient(self)
+        frame = ttk.Frame(dialog, padding=20); frame.pack(fill="both", expand=True)
+        original = next((r["id"] for r in reversed(rows) if r["action"] == "configure"), rows[-1]["id"])
+        labels = [r["created"][:19].replace("T", " ") + " · " + ("首次配置前" if r["id"] == original else "恢复前" if r["action"] == "restore" else "配置前") + (" · " + r["model"] if r["model"] else "") + " · " + r["id"][-8:] for r in rows]
+        choice = tk.StringVar(dialog, value=labels[next(i for i, r in enumerate(rows) if r["id"] == original)])
+        ttk.Label(frame, text="选择要恢复的版本；默认选中首次配置前的原配置。", wraplength=680).pack(anchor="w")
+        ttk.Combobox(frame, textvariable=choice, values=labels, state="readonly", width=85).pack(fill="x", pady=14)
+        ttk.Label(frame, text="请先关闭对应客户端。恢复会覆盖上述客户端配置，原本不存在的文件会删除；当前配置会先另存备份。\n恢复本机配置无需连接服务器。", wraplength=680, justify="left").pack(anchor="w")
+        def restore():
+            if self.busy: return
+            identifier = rows[labels.index(choice.get())]["id"]
+            def done(result):
+                if dialog.winfo_exists(): dialog.destroy()
+                self.status.configure(text=CLIENTS[client] + " 原配置已恢复；请重启客户端。")
+                messagebox.showinfo("客户端配置已恢复", "已恢复所选版本，请重启 " + CLIENTS[client] + "。\n\n恢复前配置已备份：" + result["backup_id"], parent=self)
+            self._run(lambda: configurator.restore(client, identifier), done, "备份当前配置并恢复所选客户端版本…")
+        actions = ttk.Frame(frame); actions.pack(anchor="w", pady=14)
+        self._button(actions, "备份当前配置并恢复", restore, track=False).pack(side="left")
+        self._button(actions, "取消", dialog.destroy, track=False).pack(side="left", padx=12)
+
+    def _oauth(self, provider):
+        if self.busy or not self._ready(): return
+        c = self.current
+        try:
+            login = self.controller.oauth_login(c, provider)
+        except ManagerError as error:
+            messagebox.showerror("登录授权", str(error), parent=self); return
+        dialog = tk.Toplevel(self); dialog.title("登录授权 · " + OAUTH_PROVIDERS[provider]['label'])
+        dialog.transient(self); dialog.geometry("620x230")
+        frame = ttk.Frame(dialog, padding=20); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="正在为“" + c.label + "”准备登录…", wraplength=570).pack(anchor="w")
+        hint = tk.StringVar(dialog, value="请保持管理器打开；回调会自动转交这台服务器。")
+        ttk.Label(frame, textvariable=hint, wraplength=570, justify="left").pack(anchor="w", pady=12)
+        code = tk.StringVar(dialog)
+        entry = ttk.Entry(frame, textvariable=code, state="readonly", width=30)
+        actions = ttk.Frame(frame); actions.pack(anchor="w", pady=12)
+        self._button(actions, "取消本次授权", login.cancel, track=False).pack(side="left")
+        dialog.protocol("WM_DELETE_WINDOW", login.cancel)
+        def ready(data):
+            acknowledgement = threading.Event(); errors = []
+            def open_browser(value):
+                try:
+                    if login.cancel_event.is_set() or not self.current or server_key(self.current) != server_key(c):
+                        raise ManagerError("授权已取消或服务器已切换，未打开旧授权页。")
+                    if value.get("mode") in {"device", "api-device"}:
+                        hint.set("请在官方网页完成设备授权；如网页要求输入设备码，请使用下面的码。服务器会自动取得授权结果，无需本机回调端口。")
+                        if value.get("user_code"):
+                            code.set(value["user_code"]); entry.pack(anchor="w", before=actions)
+                    elif value.get("mode") == "observe":
+                        hint.set("固定回调端口被占用，将仅从 Chrome 读取属于本次登录的回调。回调页可能显示连接错误，不需复制网址，请以管理器的最终结果为准。")
+                    else:
+                        hint.set("请在新打开的官方网页完成登录；不需要复制回调网址。以管理器的最终结果为准。")
+                except Exception as error:
+                    errors.append(error if isinstance(error, ManagerError) else ManagerError("打开浏览器未完成，授权已停止。"))
+                finally:
+                    acknowledgement.set()
+            self.events.put(("oauth_ready", data, open_browser))
+            while not acknowledgement.wait(0.1):
+                if login.cancel_event.is_set():
+                    raise ManagerError("授权已取消，未继续打开网页。")
+            if errors: raise errors[0]
+            if login.cancel_event.is_set():
+                raise ManagerError("授权已取消，未继续打开网页。")
+            from .oauth import open_authorization_browser
+            # AppleScript/system permission waits must not freeze Tk cancellation.
+            if not open_authorization_browser(data["url"]):
+                raise ManagerError("无法打开授权浏览器；授权已停止，请检查浏览器后重试。")
+        def progress(text):
+            self.events.put(("progress", {"message": text}, None))
+        def done(_):
+            self.status.configure(text="服务器已保存并识别本次授权；实际模型可用性以后台查询为准。")
+            self._refresh_project_info()
+        def close_dialog():
+            if login.finished.is_set():
+                if dialog.winfo_exists(): dialog.destroy()
+            elif self.winfo_exists():
+                self.after(100, close_dialog)
+        self._run(lambda: login.run(ready, progress), done, "正在准备服务器登录授权…")
+        self.after(100, close_dialog)
+
     def _save_project_credentials(self):
         if not self._ready(): return
         key = self._service_key(self.manage_choice.get()); c = self.current
+        if key == "cliproxyapi":
+            secret = simpledialog.askstring("补充管理 Key", "填写现有管理 Key；验证后保存到本机钥匙串，不修改服务器。", show="•", parent=self)
+            if not secret: return
+            def save_key():
+                result = self.controller.transport(c).call({"action": "verify_cliproxy_key", "management_key": secret})
+                if not result.get("verified"): raise ManagerError("管理 Key 验证失败，未保存。")
+                self.store.vault.put(credential_alias(c, key), {"management_key": secret})
+            self._run(save_key, lambda _: self._refresh_project_info(), "验证并保存管理 Key…")
+            return
         if key != "xui":
             messagebox.showinfo("登录信息", "代理面板的旧密码无法从服务器反推，可在这里补充本机记录。其他项目的信息直接从服务器读取。",parent=self); return
         dialog = tk.Toplevel(self); dialog.title("补充代理面板登录信息"); dialog.transient(self)
@@ -2027,7 +2336,7 @@ class App(tk.Tk):
 
     def _firewall(self):
         if not self._ready(): return
-        ports = [{"port": x["port"], "protocol": x["protocol"]} for x in self.report["listeners"] if not x["local_only"] and x["port"] in {self.current.port, 80, 443, 26483, 51752, 2053, 30043}]
+        ports = [{"port": x["port"], "protocol": x["protocol"]} for x in self.report["listeners"] if not x["local_only"] and x["port"] in {self.current.port, 80, 443, 26483, 51752, 2053, 30043, 9229}]
         rules = sorted({(self.current.port, "tcp")} | {(item["port"], item["protocol"]) for item in ports})
         listing = "\n".join(f"• {protocol.upper()} {number}" for number, protocol in rules)
         self._execute({"operation": "firewall", "ssh_port": self.current.port, "ports": ports}, "开启服务器防火墙，保留现有规则，本次放行：\n"+listing+"\n未列出的自定义端口需已有放行规则；云平台安全组需按对应协议另行设置。\n新连接验证失败会自动恢复原防火墙配置。")
@@ -2182,6 +2491,12 @@ def main():
         missing = [name for name in ["ssh", "ssh-keygen", "ssh-keyscan"] if not shutil.which(name)]
         if missing:
             raise SystemExit("缺少 OpenSSH 工具。")
+        try:
+            import segno
+            segno.make('linux-manager-runtime-check')
+            root = tk.Tk(); root.withdraw(); root.update_idletasks(); root.destroy()
+        except (ImportError, tk.TclError):
+            raise SystemExit("图形界面或二维码运行环境不可用；未读取本机登录档案。") from None
         print(APP_NAME + "：环境检查通过。")
         return
     import fcntl
