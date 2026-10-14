@@ -1,5 +1,12 @@
 # linux服务器管理测试记录
 
+## GitHub 发版验收（2026-10-14）
+
+- [完整回归与真实代理验收](https://github.com/yushengsheng/linux-manager/actions/runs/38539228772) 全部通过：Ubuntu 24.04 完整回归 550 项，541 项通过、9 项平台或可选环境跳过；x86_64 与 ARM64 的官方代理安装、实际转发、配置调整和故障恢复通过。
+- [真实 Nginx 与证书兼容验收](https://github.com/yushengsheng/linux-manager/actions/runs/38539228806) 全部通过：114 项相关回归通过，包括在 Mac 本地跳过的真实 Nginx 路由测试；先安装 Nginx / 先安装交易系统，结合默认网页端口 / 自定义网页端口的四种组合均通过真实安装及证书生命周期检查。
+- GitHub 验证源码提交为 `6e3e42bc8d0a737dfecbc6f2e9b79468a3ced68e`。之后仅更新文档和安装包校验值，程序、测试、工具、脚本与工作流内容一致。
+- 验收在 GitHub 独立环境运行，未操作用户的 Linux 服务器。Mac 通用包仍为临时签名，未公证；Intel 通过 Rosetta 验证，未在 Intel 实体机或全部 macOS 版本实测。
+
 ## CLIProxyAPI 集成与跨机器 OAuth（2026-10-13，仅本地源码）
 
 - 最新完整回归执行 **459 项：458 通过、1 项可选 Nginx 实机环境跳过**（Python 3.11 / Tk 9，49.067 秒）。新增 OAuth 专项 26 项，包括八项内置契约、PKCE／redirect 保留、Claude 回调别名、Devin 动态端口、设备授权、重复／过期／取消／错误 state、跨服务器快照隔离、SSH 中断、IPv4／IPv6 占用与清理，以及真实 Tk 后台／Chrome 等待不冻结界面。静态编译、差异空白检查和目标源码凭据模式检查通过。

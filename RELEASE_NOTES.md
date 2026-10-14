@@ -19,6 +19,8 @@
 
 之前已在测试服务器验证 Codex、Antigravity 授权及少量模型请求；其余提供商不能按真实账号推理通过对待。发版检查和发布过程不操作用户真实服务器；GitHub 自动验收在独立测试环境执行。
 
+验证：本地 550 项测试中 549 项通过、1 项因本机测试环境跳过；[GitHub 完整回归与双架构代理实测](https://github.com/yushengsheng/linux-manager/actions/runs/38539228772)、[真实 Nginx / 证书兼容实测](https://github.com/yushengsheng/linux-manager/actions/runs/38539228806) 全部通过。先前跳过的真实 Nginx 测试已在 GitHub 独立 Linux 环境补测通过。
+
 # v0.3.11 发布说明
 
 发布日期：2026-10-13。
