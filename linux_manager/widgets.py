@@ -93,12 +93,22 @@ class ScrollPage(ttk.Frame):
         if not hasattr(root, "_scroll_pages"):
             root._scroll_pages = []
             def wheel(event):
-                for page in root._scroll_pages:
-                    if str(event.widget).startswith(str(page)) and page.winfo_ismapped():
+                widget = event.widget
+                while isinstance(widget, tk.Misc):
+                    if isinstance(widget, ScrollPage):
+                        if not widget.winfo_ismapped():
+                            return
                         delta = event.delta
                         units = -int(delta / 120) * 3 if abs(delta) >= 120 else -delta
-                        if units: page.canvas.yview_scroll(units, "units")
-                        break
+                        if units: widget.canvas.yview_scroll(units, "units")
+                        return "break"
+                    # Native tables, text boxes and other scrollable children
+                    # already handled the wheel in their class binding. Keep
+                    # ownership even at an edge; never also move the page.
+                    page_canvas = isinstance(widget.master, ScrollPage) and widget is widget.master.canvas
+                    if callable(getattr(widget, "yview", None)) and not page_canvas:
+                        return
+                    widget = widget.master
             root.bind_all("<MouseWheel>", wheel, add="+")
         root._scroll_pages.append(self)
 

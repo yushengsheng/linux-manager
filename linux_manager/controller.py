@@ -65,7 +65,8 @@ class Controller:
 
     def inspect(self, connection: Connection) -> dict:
         report = self.transport(connection).call({"action": "snapshot", "include_projects": True, "host": connection.host})
-        report["project_information"] = {kind:self._project_information(connection, kind, data) for kind,data in report.get("project_details",{}).items()}
+        report["project_information"] = {kind:self._read_project_information(connection, kind, data) for kind,data in report.get("project_details",{}).items()}
+        self._remember_projects(connection, builtins=report["project_information"])
         self.observe_tasks(connection, report.get("tasks", []))
         return report
 
@@ -123,9 +124,153 @@ class Controller:
                 values = pending
         return {"server_key":server_key(connection),"service":service,"data":data,"rows":information_rows(data,connection,values)}
 
+    def _read_project_information(self, connection, service, data):
+        try:
+            return self._project_information(connection, service, data)
+        except ManagerError:
+            warning = "本机登录记录未能完整读取或验证；服务器项目信息仍可查看。"
+            return {"server_key": server_key(connection), "service": service, "data": data,
+                    "rows": information_rows(data, connection, {}) + [("本机登录记录", warning)],
+                    "credentials_warning": warning}
+
     def project_information(self, connection, service):
         data = self.transport(connection).call({"action":"details","service":service,"host":connection.host})
-        return self._project_information(connection,service,data)
+        information = self._read_project_information(connection,service,data)
+        self._remember_projects(connection, builtins={service: information})
+        return information
+
+    def _remember_projects(self, connection, **values):
+        from .project_cache import ProjectCache
+        try: ProjectCache(self.store.directory).update(connection, **values)
+        except (ManagerError, OSError):
+            return "本次读取成功，但本机缓存未保存；原缓存已保留。"
+        return ""
+
+    def cached_projects(self, connections):
+        from .project_cache import ProjectCache
+        snapshots, warnings = {}, []
+        for connection in connections:
+            identity = server_key(connection)
+            if identity in snapshots: continue
+            try:
+                data = ProjectCache(self.store.directory).load(connection)
+                builtins = {kind: {"server_key": identity, "service": kind, "data": row,
+                                   "rows": information_rows(row, connection, {})}
+                            for kind, row in data["builtins"].items()}
+                snapshots[identity] = {"projects": list(data["projects"].values()), "builtin_information": builtins,
+                                       "saved_at": data.get("saved_at", "")}
+            except (ManagerError, ValueError, TypeError, AttributeError):
+                warnings.append("部分本机项目缓存未能读取；原文件已保留，可连接后重新读取。")
+        return {"servers": snapshots, "warnings": list(dict.fromkeys(warnings))}
+
+    def _external_registrations(self):
+        path = self.store.directory / "external-projects.json"
+        if not path.exists(): return {"version": 1, "servers": {}}
+        try:
+            data = json.loads(path.read_text())
+            valid = isinstance(data, dict) and data.get("version") == 1 and isinstance(data.get("servers"), dict)
+            if valid:
+                valid = all(isinstance(rows, list) and len(rows) <= 100 and all(
+                    isinstance(row, dict) and isinstance(row.get("id"), str) and isinstance(row.get("path"), str)
+                    for row in rows) for rows in data["servers"].values())
+            if valid: return data
+        except (OSError, ValueError, TypeError): pass
+        raise ManagerError("本机外部项目登记文件无效；原文件已保留，未覆盖。")
+
+    def external_projects(self, connection, include_builtin=False):
+        registrations = self._external_registrations()["servers"].get(server_key(connection), [])
+        result = self.transport(connection).call({"action": "external_projects", "directories": [row["path"] for row in registrations],
+                                                   "include_builtin": include_builtin, "host": connection.host}, timeout=90)
+        result["builtin_information"] = {}
+        for project in result["projects"]: self._external_web_urls(connection, project)
+        for service, data in result.pop("builtin_details", {}).items():
+            from .models import SERVICES
+            from .project_info import SERVICE_PROTOCOLS, frontend_port_protocol
+            information = self._read_project_information(connection, service, data)
+            if information.get("credentials_warning"):
+                result["warnings"].append("部分本机登录记录未能读取；服务器项目信息仍可查看。")
+            result["builtin_information"][service] = information
+            if not data.get("installed") or data.get("uninstalled"): continue
+            state = "active" if any(unit.get("ActiveState") == "active" for unit in data.get("units", [])) else "inactive"
+            protocol = frontend_port_protocol(data, data.get("port")) if service == "nginx" else SERVICE_PROTOCOLS.get(service, "TCP")
+            ports = [{"port": data["port"], "protocol": item.lower(), "local_only": False}
+                     for item in ("TCP", "UDP") if item in protocol] if data.get("port") else []
+            result["projects"].insert(0, {"id": "builtin:" + service, "kind": "builtin", "service": service,
+                                         "name": SERVICES[service][0], "product": SERVICES[service][0], "state": state,
+                                         "ports": ports, "capabilities": [], "information": information})
+        warning = self._remember_projects(connection, projects=[p for p in result["projects"] if p["kind"] != "builtin"],
+                                           builtins=result["builtin_information"], replace=not result.get("warnings"))
+        if warning: result["warnings"].append(warning)
+        return result
+
+    def external_project_information(self, connection, identifier):
+        from .external_projects import ExternalProjects
+        request = {"action": "external_details", "identifier": identifier}
+        entry = None
+        if identifier.startswith("external:directory:"):
+            rows = self._external_registrations()["servers"].get(server_key(connection), [])
+            entry = next((row for row in rows if row["id"] == identifier), None)
+            if entry: request["directory"] = entry["path"]
+        project = self.transport(connection).call(request, timeout=90)
+        self._external_web_urls(connection, project)
+        if identifier.startswith("external:directory:") and entry: project["registered_local"] = True
+        cache_warning = self._remember_projects(connection, projects=[project])
+        warning = ""
+        try: credentials = self.store.vault.get(credential_alias(connection, identifier))
+        except ManagerError:
+            credentials = {}; warning = "本机钥匙串未允许读取；服务器项目信息仍可查看。"
+        return {"project": project, "fingerprint": ExternalProjects.fingerprint(project),
+                "credentials": credentials, "credentials_warning": warning, "cache_warning": cache_warning}
+
+    @staticmethod
+    def _external_web_urls(connection, project):
+        from .project_cache import safe_url
+        from .project_info import authority
+        for endpoint in project.get("web_endpoints", []):
+            if endpoint.get("url"): continue
+            host = endpoint.get("host") or ("127.0.0.1" if endpoint.get("local_only") else connection.host)
+            if endpoint.get("scheme") not in {"http", "https"} or not isinstance(endpoint.get("port"), int): continue
+            url = endpoint["scheme"] + "://" + authority(host, endpoint["port"]) + endpoint.get("path", "/")
+            if safe_url(url): endpoint["url"] = url
+
+    def save_external_project_credentials(self, connection, identifier, values):
+        import re
+        from urllib.parse import urlsplit
+        if not isinstance(identifier, str) or not re.fullmatch(r"external:(?:systemd|systemd-user|docker|pm2|process|directory):[A-Za-z0-9_.:@\\-]{1,260}", identifier):
+            raise ManagerError("外部项目标识无效，请重新读取项目列表。")
+        values = {key: str(values.get(key, "")) for key in ("username", "password", "url", "notes")}
+        if any(len(value) > 2000 or "\x00" in value for value in values.values()):
+            raise ManagerError("登录信息过长或包含无效字符，未保存。")
+        values["url"] = values["url"].strip()
+        if values["url"]:
+            try:
+                parsed = urlsplit(values["url"])
+                valid = parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
+                valid = valid and not any(c in values["url"] for c in "\r\n\t ")
+                parsed.port
+            except ValueError: valid = False
+            if not valid: raise ManagerError("管理网址需为完整 HTTP 或 HTTPS 地址，且不能嵌入账号密码。")
+        self.store.vault.put(credential_alias(connection, identifier), values)
+        return values
+
+    def register_external_directory(self, connection, path):
+        project = self.transport(connection).call({"action": "external_directory", "directory": path})
+        data = self._external_registrations()
+        rows = data["servers"].setdefault(server_key(connection), [])
+        if not any(row["id"] == project["id"] for row in rows):
+            if len(rows) >= 100: raise ManagerError("当前服务器已登记 100 个目录，请先移除不需要的本机登记。")
+            rows.append({"id": project["id"], "path": project["working_directory"]})
+            atomic_private(self.store.directory / "external-projects.json", json.dumps(data, ensure_ascii=False))
+        project["registered_local"] = True
+        self._remember_projects(connection, projects=[project])
+        return project
+
+    def forget_external_directory(self, connection, identifier):
+        data = self._external_registrations()
+        rows = data["servers"].get(server_key(connection), [])
+        data["servers"][server_key(connection)] = [row for row in rows if row["id"] != identifier]
+        atomic_private(self.store.directory / "external-projects.json", json.dumps(data, ensure_ascii=False))
+        self._remember_projects(connection, remove=identifier)
 
     def oauth_login(self, connection, provider):
         from .oauth import OAuthLogin
@@ -448,6 +593,10 @@ class Controller:
                         self.store.vault.delete(alias)
                     else:
                         self.store.vault.put(alias, saved | {"username": params["new_username"]})
+        project = status.get("result", {}).get("external_project")
+        if project:
+            self._external_web_urls(connection, project)
+            self._remember_projects(connection, projects=[project])
         return status, connection
 
     def synchronize_profiles(self, profiles, original, updated, params):

@@ -218,10 +218,10 @@ class HelpCoverageTests(unittest.TestCase):
         self.assertEqual(app.input_states, [])
 
     def test_every_literal_action_input_toggle_and_page_has_plain_language_help(self):
-        source = Path(__file__).resolve().parents[1] / "linux_manager/gui.py"
-        tree = ast.parse(source.read_text())
+        directory = Path(__file__).resolve().parents[1] / "linux_manager"
+        sources = [directory / "gui.py", *sorted(directory.glob("gui_*.py"))]
         found = []
-        for node in ast.walk(tree):
+        for node in (node for source in sources for node in ast.walk(ast.parse(source.read_text()))):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 method = node.func.attr
                 index = {"_button": 1, "_field": 2, "_check": 1, "_description": 1, "_help_label": 1}.get(method)

@@ -8,6 +8,7 @@ import sqlite3
 import types
 import unittest
 from unittest import mock
+import zlib
 
 from linux_manager.controller import Controller
 from linux_manager.gui import App, SERVICES
@@ -573,7 +574,7 @@ class UninstallControllerAndUITests(unittest.TestCase):
             askpass.return_value.__enter__.return_value = {}
             ssh.call({"action": "uninstall_preflight", "params": self.params()})
         packet = next(line[10:] for line in run.call_args.kwargs["input"].splitlines() if line.startswith("LMREQUEST:"))
-        source = json.loads(base64.b64decode(packet))["agent"]
+        source = json.loads(zlib.decompress(base64.b64decode(packet)))["agent"]
         scope = {"__name__": "uninstall_embedded_fixture"}
         exec(compile(source, "<isolated-embedded-source>", "exec"), scope)
         self.assertIn("uninstall_project", scope); self.assertIn("restore_uninstall", scope)

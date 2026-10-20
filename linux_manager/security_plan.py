@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import secrets
-from pathlib import Path
 
 from .models import Connection, ManagerError, atomic_private, validate_user, validate_password
 from .vault import vault_alias

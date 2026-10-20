@@ -14,7 +14,6 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, simpledialog, ttk
-import urllib.parse
 import webbrowser
 
 from . import APP_NAME, VERSION
@@ -24,18 +23,22 @@ from .releases import LATEST_STABLE, SPECIFIC_VERSION, KEEP_CURRENT, exchange_ve
 from .help_texts import HELP
 from .widgets import HelpAction, ScrollPage, install_check_style, sync_tree
 from .key_info import encrypted_key
-from .project_info import server_key, credential_alias, SERVICE_PROTOCOLS, deployment_network_hint
-from .qr import is_node_link, qr_png
+from .project_info import server_key, credential_alias, deployment_network_hint
+from .qr import qr_png
 from .transport import WaitingStopped
 from .oauth_contract import OAUTH_PROVIDERS
 from .client_config import CLIENTS, ClientConfigurator, chat_models, gateway_connection, gateway_models
 from .client_apps import installed_applications, resolve_application
 
+from .gui_common import BG, INK, MUTED, BLUE
+from .gui_connections import ConnectionPages
+from .gui_overview import OverviewPage
+from .gui_accounts import AccountsPage
+from .gui_security import SecurityPage
+from .gui_applications import ApplicationPages
+from .gui_history import HistoryPage
+
 BASE = Path(__file__).resolve().parents[1]
-BG = "#f4f6fa"
-INK = "#17243d"
-MUTED = "#718096"
-BLUE = "#2563eb"
 NAVIGATION = {
     "服务器总览": "服务器概览",
     "日常维护": "应用管理",
@@ -71,11 +74,7 @@ def answer_askpass():
     return 0
 
 
-def readable_size(value):
-    return f"{value / 1024 ** 3:.1f} GB"
-
-
-class App(tk.Tk):
+class App(ConnectionPages, OverviewPage, AccountsPage, SecurityPage, ApplicationPages, HistoryPage, tk.Tk):
     def __init__(self, development_profile=False):
         super().__init__()
         self.title(APP_NAME)
@@ -111,6 +110,7 @@ class App(tk.Tk):
         self.report_server_key = None
         self._style()
         self._build()
+        self._manage_action_states()
         self._profile_options()
         self._cache_inputs()
         if development_profile:
@@ -421,27 +421,13 @@ class App(tk.Tk):
     def _configure_project(self):
         if self.busy:
             return
+        if self._service_key(self.manage_choice.get()) not in SERVICES:
+            self.status.configure(text="外部项目请使用原有安装方式调整配置。")
+            return
         self.deploy_choice.set(self.manage_choice.get())
         self._deploy_defaults()
         self.notebook.select(self.pages["一键部署"])
 
-    def _open_selected_project(self, _=None):
-        if self.busy:
-            return
-        selection = self.service_tree.selection()
-        if not selection or selection[0] not in SERVICES:
-            self.status.configure(text="先在项目列表中选择要管理的项目。")
-            return
-        kind = selection[0]
-        self.manage_choice.set(SERVICES[kind][0])
-        self._project_changed()
-        installed = any(unit.get("LoadState") == "loaded" for unit in (self.report or {}).get("services", {}).get(kind, []))
-        if (self.report or {}).get("project_information", {}).get(kind, {}).get("data", {}).get("uninstalled"):
-            installed = False
-        if installed:
-            self.notebook.select(self.pages["日常维护"])
-        else:
-            self._configure_project()
 
     def _button(self, parent, text, action, primary=False, track=True):
         button = HelpAction(parent, text, action, lambda: self._help(text), "Primary.TButton" if primary else "TButton")
@@ -502,77 +488,6 @@ class App(tk.Tk):
         self._help_label(parent, title).pack(anchor="w")
         ttk.Label(parent, text=text, style="Muted.TLabel", wraplength=1000, justify="left").pack(anchor="w", pady=(5, 10))
 
-    def _connection_page(self):
-        page = self.pages["连接服务器"].content
-        self._description(page, "填写必要信息，其余交给程序", "首次连接确认服务器身份；连接后自动检查系统、服务和安全配置。已有服务会保持原样。")
-        form = ttk.Frame(page)
-        form.pack(anchor="w", fill="x")
-        form.columnconfigure(1, weight=1)
-        self.profile_choice = tk.StringVar()
-        self._help_label(form, "保存的服务器").grid(row=0, column=0, sticky="e", padx=(0, 12), pady=6)
-        self.profile_box = ttk.Combobox(form, textvariable=self.profile_choice, state="readonly", width=39)
-        self.profile_box.grid(row=0, column=1, sticky="w", pady=6)
-        self.profile_box.bind("<<ComboboxSelected>>", self._choose_profile)
-        self._button(form, "添加新服务器", self._new_profile).grid(row=0, column=2, padx=12)
-        self.label_var = tk.StringVar(value="我的服务器")
-        self.host_var = tk.StringVar()
-        self.user_var = tk.StringVar()
-        self.port_var = tk.StringVar(value="22")
-        self.auth_var = tk.StringVar(value="密码登录")
-        self.password_var = tk.StringVar()
-        self.key_var = tk.StringVar()
-        self.passphrase_var = tk.StringVar()
-        self.sudo_var = tk.StringVar()
-        self.remember_var = tk.BooleanVar(value=True)
-        self._field(form, 1, "服务器备注", self.label_var)
-        self._field(form, 2, "服务器地址", self.host_var, True)
-        self._field(form, 3, "登录账号", self.user_var, True)
-        self._field(form, 4, "SSH 端口（TCP）", self.port_var)
-        self._help_label(form, "登录方式").grid(row=5, column=0, sticky="e", padx=(0, 12))
-        auth_box = ttk.Combobox(form, textvariable=self.auth_var, values=["密码登录", "密钥登录"], state="readonly")
-        auth_box.grid(row=5, column=1, sticky="w", pady=6)
-        auth_box.bind("<<ComboboxSelected>>", lambda event: self._auth_fields())
-        self.password_entry = self._field(form, 6, "登录密码", self.password_var, True)
-        self.key_entry = self._field(form, 7, "SSH 私钥", self.key_var, True)
-        self.key_button = self._button(form, "选择文件", lambda: self._select_file(self.key_var, "选择 SSH 私钥"))
-        self.key_button.grid(row=7, column=2, padx=12)
-        self.passphrase_entry = self._field(form, 8, "私钥口令（如有）", self.passphrase_var, True)
-        self._field(form, 9, "管理员密码（如不同）", self.sudo_var, True)
-        self._check(form, "记住登录信息（仅本机）", self.remember_var).grid(row=10, column=1, sticky="w", pady=6)
-        actions = ttk.Frame(page)
-        actions.pack(fill="x", pady=(18, 10))
-        self._button(actions, "连接并检查", self._connect, True).pack(side="left")
-        self._button(actions, "保存连接档案", self._save_profile).pack(side="left", padx=12)
-        self._button(actions, "VNC 登录排查", self._vnc_help).pack(side="left")
-        self._button(actions, "重新确认服务器身份", self._reconfirm_identity).pack(side="left", padx=12)
-        ttk.Label(page, text="这里填写已有密码和旧私钥口令，不生成替换。新系统密码可在“账号与登录”一键生成；新私钥口令在“安全防护”生成。", style="Muted.TLabel", wraplength=1000).pack(anchor="w", pady=8)
-        self._auth_fields()
-
-    def _auth_fields(self):
-        key = self.auth_var.get() == "密钥登录"
-        self.password_entry.configure(state="disabled" if key else "normal")
-        for entry in [self.key_entry, self.passphrase_entry, self.key_button]:
-            entry.configure(state="normal" if key else "disabled")
-
-    def _fleet_page(self):
-        page = self.pages["服务器列表"].content
-        self._description(page, "多台服务器，各自保存登录信息", "同一台服务器的不同账号也能分别保存。先选中档案，再切换并连接；操作只针对当前已连接的服务器。")
-        row = ttk.Frame(page); row.pack(fill="x", pady=(0, 16))
-        self._button(row, "检查全部服务器", self._check_fleet).pack(side="left")
-        self._button(row, "切换到选中服务器", self._switch_fleet).pack(side="left", padx=10)
-        self._button(row, "移除本机档案", self._remove_profile).pack(side="left")
-        self.fleet_tree = self._tree(page, [("label", "备注", 150), ("address", "服务器 / 账号", 230), ("auth", "登录方式", 100), ("state", "检查状态", 170), ("os", "系统", 230), ("time", "检查时间", 100)], height=10)
-        self.fleet_tree.bind("<Double-1>", lambda event: self._switch_fleet())
-
-    def _render_fleet(self):
-        rows = []
-        for profile in self.profiles:
-            state, when = self.fleet_states.get(profile.identifier, ("尚未检查", "—"))
-            report = self.fleet_reports.get(profile.identifier, {})
-            address = "已隐藏" if self.privacy.get() else profile.host + " / " + profile.username
-            rows.append((profile.identifier, (profile.label, address, "密钥" if profile.auth == "key" else "密码", state, report.get("os", "—"), when)))
-        sync_tree(self.fleet_tree, rows)
-        self._render_sidebar()
 
     def _switch_fleet(self):
         if self.busy: return
@@ -629,352 +544,6 @@ class App(tk.Tk):
             self.store.remove(identifier)
         self._run(worker, done, "正在移除本机档案…")
 
-    def _overview_page(self):
-        page = self.pages["服务器总览"].content
-        top = ttk.Frame(page)
-        top.pack(fill="x")
-        self._button(top, "重新检查", self._refresh).pack(side="right")
-        self.system_label = ttk.Label(top, text="连接后显示服务器信息", style="Heading.TLabel")
-        self.system_label.pack(side="left", pady=10)
-        cards = ttk.Frame(page)
-        cards.pack(fill="x", pady=(10, 14))
-        self.statistics = {}
-        for index, (key, label) in enumerate([("disk", "可用磁盘"), ("memory", "可用内存"), ("services", "运行中的项目"), ("security", "SSH 登录方式")]):
-            card = ttk.Frame(cards, style="Card.TFrame", padding=12)
-            card.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 10, 0))
-            cards.columnconfigure(index, weight=1)
-            ttk.Label(card, text=label, style="Card.TLabel").pack(anchor="w")
-            value = ttk.Label(card, text="—", style="Stat.TLabel")
-            value.pack(anchor="w", pady=(8, 2))
-            self.statistics[key] = value
-        ttk.Label(page, text="项目与配套服务", style="Heading.TLabel").pack(anchor="w", pady=(0, 12))
-        self.service_tree = self._tree(page, [("name", "项目", 185), ("status", "运行状态", 130), ("startup", "开机启动", 130), ("purpose", "作用", 460)], height=5)
-        self.service_tree.bind("<Double-1>", self._open_selected_project)
-        self.service_tree.bind("<Return>", self._open_selected_project)
-        self._button(page, "管理选中项目", self._open_selected_project).pack(anchor="w", pady=(12, 0))
-        self.security_summary = ttk.Label(page, text="安全状态将在连接检查后显示。", style="Muted.TLabel", wraplength=1000, justify="left")
-        self.security_summary.pack(anchor="w", pady=18)
-
-    def _accounts_page(self):
-        page = self.pages["账号与登录"].content
-        self._description(page, "账号、密码和连接方式", "变更连接配置前备份；新连接通过验证后才完成切换。超级管理员账号保持不变，可创建普通管理员后切换使用。")
-        server_row = ttk.Frame(page); server_row.pack(fill="x", pady=(0, 12))
-        self._help_label(server_row, "账号所属服务器").pack(side="left", padx=(0, 12))
-        self.account_server_box = ttk.Combobox(server_row, state="readonly", width=36)
-        self.account_server_box.pack(side="left", fill="x", expand=True)
-        self.account_server_box.bind("<<ComboboxSelected>>", self._choose_account_server)
-        self.account_server_status = ttk.Label(page, text="先连接服务器，再查看这台服务器的用户。", style="Muted.TLabel")
-        self.account_server_status.pack(anchor="w", pady=(0, 8))
-        counts = ttk.Frame(page); counts.pack(fill="x", pady=6)
-        self.account_count = ttk.Label(counts, text="连接后统计全部本机用户。")
-        self.account_count.pack(side="left")
-        self.show_system_accounts = tk.BooleanVar(value=False)
-        self._check(counts, "显示系统账号", self.show_system_accounts, command=self._render_accounts).pack(side="right")
-        self.account_tree = self._tree(page, [("name", "账号", 180), ("role", "权限", 140), ("keys", "登录密钥", 120), ("password", "系统密码", 130), ("access", "SSH 登录", 170)], height=6)
-        self.account_tree.bind("<<TreeviewSelect>>", self._select_account)
-        actions = ttk.Frame(page); actions.pack(fill="x", pady=8)
-        self._button(actions, "刷新用户列表", self._refresh_accounts).pack(side="left")
-        self._button(actions, "查看选中账号详情", self._account_details).pack(side="left", padx=6)
-        self._button(actions, "复制选中账号信息", self._copy_account).pack(side="left")
-        self._button(page, "删除选中用户（保留文件）", self._delete_user).pack(anchor="w", pady=(0, 6))
-        self.account_detail_text = tk.Text(page, height=10, wrap="word", bg="white", foreground=INK, font="TkDefaultFont", relief="flat", padx=14, pady=10, state="disabled")
-        self.account_detail_text.pack(fill="x", pady=6)
-        self._replace_text(self.account_detail_text, "选中账号可以查看登录名、权限、登录策略和本机私钥位置。系统服务账号默认折叠，不能删除。")
-        forms = ttk.Frame(page)
-        forms.pack(fill="x", pady=14)
-        left = ttk.LabelFrame(forms, text="账号管理", padding=12)
-        right = ttk.LabelFrame(forms, text="SSH 连接设置", padding=12)
-        left.grid(row=0, column=0, sticky="nsew", pady=(0, 14))
-        right.grid(row=1, column=0, sticky="nsew")
-        forms.columnconfigure(0, weight=1)
-        self.account_user = tk.StringVar()
-        self.account_password = tk.StringVar()
-        self.account_confirmation = tk.StringVar()
-        self.new_username = tk.StringVar()
-        self.install_key = tk.BooleanVar(value=True)
-        self._field(left, 0, "账号名", self.account_user, True, 24)
-        self._field(left, 1, "新密码", self.account_password, True, 24)
-        self._field(left, 2, "再次输入", self.account_confirmation, True, 24)
-        self._button(left, "生成密码", lambda: self._generate_password(self.account_password, self.account_confirmation)).grid(row=1, column=2, padx=12)
-        self._field(left, 3, "改名后的账号", self.new_username, True, 24)
-        self._check(left, "创建账号时配置本机专用密钥", self.install_key).grid(row=4, columnspan=2, sticky="w", pady=6)
-        row = ttk.Frame(left); row.grid(row=5, columnspan=2, sticky="w", pady=10)
-        self._button(row, "创建管理员", lambda: self._account_operation("create_admin")).pack(side="left")
-        self._button(row, "修改密码", lambda: self._account_operation("password")).pack(side="left", padx=6)
-        self._button(row, "账号改名", lambda: self._account_operation("rename_user")).pack(side="left")
-        access = ttk.Frame(left); access.grid(row=6, columnspan=2, sticky="w", pady=8)
-        self._button(access, "禁止用户登录", lambda: self._account_access(True)).pack(side="left")
-        self._button(access, "恢复用户登录", lambda: self._account_access(False)).pack(side="left", padx=8)
-        self.ssh_port = tk.StringVar(value="22")
-        self.ssh_account = tk.StringVar()
-        self.allow_password = tk.BooleanVar(value=False)
-        self.allow_root = tk.BooleanVar(value=False)
-        self.replace_key = tk.BooleanVar(value=True)
-        self._field(right, 0, "验证登录账号", self.ssh_account, True, 24)
-        self._field(right, 1, "SSH 端口（TCP）", self.ssh_port, False, 24)
-        self._check(right, "允许密码登录", self.allow_password).grid(row=2, columnspan=2, sticky="w", pady=7)
-        self._check(right, "允许超级管理员直接登录", self.allow_root).grid(row=3, columnspan=2, sticky="w", pady=7)
-        self._check(right, "添加本机专用密钥并验证", self.replace_key).grid(row=4, columnspan=2, sticky="w", pady=7)
-        self._button(right, "检查并应用 SSH 设置", self._apply_ssh, True).grid(row=5, columnspan=2, sticky="w", pady=10)
-
-    def _security_page(self):
-        page = self.pages["安全防护"].content
-        self._help_label(page, "常用安全设置").pack(anchor="w", pady=(0, 8))
-        self.protection_status = ttk.Label(page, text="先连接并检查服务器。", style="Muted.TLabel", wraplength=1000)
-        self.protection_status.pack(anchor="w", pady=(0, 8))
-        preset = ttk.LabelFrame(page, text="一键登录安全方案", padding=12); preset.pack(fill="x", pady=(0, 8))
-        ttk.Label(preset, text="推荐", style="Recommended.TLabel").grid(row=0, column=2, sticky="ne", padx=(24, 0))
-        preset.columnconfigure(2, weight=1)
-        self.plan_mode = tk.StringVar(value="修改现有用户名和密钥")
-        self.plan_username = tk.StringVar()
-        self.plan_password = tk.StringVar()
-        self.plan_phrase = tk.StringVar()
-        self._help_label(preset, "安全方案类型").grid(row=0, column=0, sticky="e", padx=(0, 12))
-        modes = ttk.Combobox(preset, textvariable=self.plan_mode, values=["修改现有用户名和密钥", "新增管理员和密钥"], state="readonly", width=32)
-        modes.grid(row=0, column=1, sticky="w", pady=6)
-        modes.bind("<<ComboboxSelected>>", self._plan_mode_changed)
-        self._field(preset, 1, "目标账号名", self.plan_username, True, 32)
-        self._field(preset, 2, "系统新密码（可留空）", self.plan_password, True, 32)
-        self._field(preset, 3, "加密私钥口令（可留空）", self.plan_phrase, True, 32)
-        self._button(preset, "生成密码", lambda: self._generate_password(self.plan_password)).grid(row=2, column=2, sticky="w", padx=12)
-        self._button(preset, "生成口令", lambda: self._generate_password(self.plan_phrase, private_key=True)).grid(row=3, column=2, sticky="w", padx=12)
-        self.plan_retire = tk.BooleanVar(value=True)
-        self.plan_fail2ban = tk.BooleanVar(value=True)
-        self.plan_updates = tk.BooleanVar(value=True)
-        self.plan_checks = {}
-        options = ttk.Frame(preset)
-        options.grid(row=4, columnspan=3, sticky="ew", pady=(8, 0))
-        options.columnconfigure(0, weight=1); options.columnconfigure(1, weight=1)
-        for i, (label, variable) in enumerate([("验证后撤销原档案旧钥匙", self.plan_retire), ("方案中启用防猜密码保护", self.plan_fail2ban), ("方案中启用自动安全更新", self.plan_updates)]):
-            check = self._check(options, label, variable)
-            check.grid(row=i // 2, column=i % 2, sticky="w", pady=3, padx=(0, 20))
-            self.plan_checks[label] = check.checkbox
-        self.plan_hint = ttk.Label(preset, text="修改当前普通管理员，并全局禁止 SSH 密码登录；名称相同则保留用户名。", style="Muted.TLabel", wraplength=930)
-        self.plan_hint.grid(row=5, columnspan=3, sticky="w", pady=(6, 4))
-        self.plan_policy_hint = ttk.Label(preset, text="私钥与口令仅存本机 · 保留端口与现有地址规则", style="Muted.TLabel", wraplength=930)
-        self.plan_policy_hint.grid(row=6, columnspan=3, sticky="w", pady=(0, 6))
-        self.plan_apply = self._button(preset, "预览并应用一键安全方案", self._apply_security_plan, True)
-        self.plan_apply.grid(row=7, columnspan=2, sticky="w", pady=(0, 3))
-        custom_header = ttk.Frame(page, padding=(0, 8, 0, 8)); custom_header.pack(fill="x")
-        self.custom_security_open = False
-        self.custom_security_toggle = self._button(custom_header, "自定义设置", self._toggle_custom_security, track=False)
-        self.custom_security_toggle.pack(side="left")
-        ttk.Label(custom_header, text="按需调整防火墙、SSH 连接及封禁规则", style="Muted.TLabel").pack(side="left", padx=14)
-        self.custom_security_frame = ttk.Frame(page)
-        custom = self.custom_security_frame
-        row = ttk.Frame(custom); row.pack(fill="x", pady=(12, 14))
-        self._button(row, "启用防火墙并保留现有规则", self._firewall).pack(side="left")
-        self._button(row, "开启自动安全更新", self._updates).pack(side="left", padx=10)
-        ssh = ttk.LabelFrame(custom, text="SSH 连接防护", padding=12); ssh.pack(fill="x", pady=8)
-        self.auth_tries = tk.StringVar(value="3")
-        self.login_grace = tk.StringVar(value="120")
-        self.alive_interval = tk.StringVar(value="0")
-        self.tcp_forwarding = tk.BooleanVar(value=True)
-        self.x11_forwarding = tk.BooleanVar(value=False)
-        self.agent_forwarding = tk.BooleanVar(value=False)
-        for index, (label, variable) in enumerate([("单次连接允许尝试次数", self.auth_tries), ("完成登录的等待秒数", self.login_grace), ("断线检查间隔秒数", self.alive_interval)]):
-            self._field(ssh, index, label, variable, width=18)
-        for index, (label, variable) in enumerate([("允许 SSH 隧道转发", self.tcp_forwarding), ("允许图形界面转发", self.x11_forwarding), ("允许转交本机密钥代理", self.agent_forwarding)], start=3):
-            self._check(ssh, label, variable).grid(row=index, columnspan=2, sticky="w", pady=5)
-        self._button(ssh, "应用 SSH 防护设置", self._harden_ssh, True).grid(row=6, columnspan=2, sticky="w", pady=10)
-        jail = ttk.LabelFrame(custom, text="防猜密码保护", padding=12); jail.pack(fill="x", pady=8)
-        self.ban_attempts = tk.StringVar(value="5")
-        self.ban_window = tk.StringVar(value="10")
-        self.ban_duration = tk.StringVar(value="60")
-        for index, (label, variable) in enumerate([("连续失败次数", self.ban_attempts), ("统计时间（分钟）", self.ban_window), ("封禁时长（分钟）", self.ban_duration)]):
-            self._field(jail, index, label, variable, width=18)
-        actions = ttk.Frame(jail); actions.grid(row=3, columnspan=2, sticky="w", pady=10)
-        self._button(actions, "启用防猜密码保护", lambda: self._fail2ban(True)).pack(side="left")
-        self._button(actions, "关闭本程序的防猜密码保护", lambda: self._fail2ban(False)).pack(side="left", padx=10)
-
-    def _toggle_custom_security(self):
-        self.custom_security_open = not self.custom_security_open
-        if self.custom_security_open:
-            self.custom_security_frame.pack(fill="x", pady=(0, 8))
-        else:
-            self.custom_security_frame.pack_forget()
-        self.custom_security_toggle.button.configure(text="收起自定义设置" if self.custom_security_open else "自定义设置")
-
-    def _plan_mode_changed(self, event=None):
-        create = self.plan_mode.get() == "新增管理员和密钥"
-        if event is not None:
-            self.plan_username.set(self.current.username if self.current and not create and self.current.username != "root" else "")
-        self.plan_checks["验证后撤销原档案旧钥匙"].configure(state="disabled" if create or not self.current or self.current.auth != "key" else "normal")
-        for label in ("方案中启用防猜密码保护", "方案中启用自动安全更新"):
-            self.plan_checks[label].configure(state="disabled" if create else "normal")
-        self.plan_hint.configure(text="仅新管理员使用密钥登录；原账号与其他账号的登录方式保持不变。" if create else "修改当前普通管理员，并全局禁止 SSH 密码登录；名称相同则保留用户名。")
-        self.plan_policy_hint.configure(text="新增模式不调整全局防猜密码保护或自动更新 · 私钥与口令仅存本机" if create else "验证新密钥后，全局禁止密码及超级管理员直接登录 · 保留端口与现有地址规则")
-
-    def _deployment_page(self):
-        page = self.pages["一键部署"].content
-        self._description(page, "选择项目，点击部署", "首次安装自动准备依赖与证书；已有项目先比对条件，只调整变化的配置，版本切换先备份并保留数据。")
-        form = ttk.Frame(page); form.pack(fill="x")
-        form.columnconfigure(0, minsize=190)
-        self.deploy_choice = tk.StringVar(value="小军交易系统")
-        self._help_label(form, "要安装的项目").grid(row=0, column=0, sticky="e", padx=(0, 12))
-        box = ttk.Combobox(form, textvariable=self.deploy_choice, values=[v[0] for v in SERVICES.values()], state="readonly", width=37)
-        box.grid(row=0, column=1, sticky="w", pady=6); box.bind("<<ComboboxSelected>>", self._deploy_defaults)
-        self.deploy_host = tk.StringVar()
-        self.deploy_port = tk.StringVar(value="26483")
-        self.deploy_backend = tk.StringVar(value="18880")
-        self.deploy_username = tk.StringVar(value="manager")
-        self.deploy_password = tk.StringVar()
-        self.deploy_api_key = tk.StringVar()
-        self.deploy_auto_update = tk.BooleanVar(value=True)
-        self.deploy_server_name = tk.StringVar(value="www.cloudflare.com")
-        self.version_mode = tk.StringVar(value=LATEST_STABLE)
-        self.deploy_version = tk.StringVar(value="部署前自动获取")
-        self.deploy_rows = {}
-        for index, (name, label, variable, private) in enumerate([
-            ("port", "服务端口", self.deploy_port, False),
-            ("username", "面板账号（代理面板）", self.deploy_username, True),
-            ("proxy_password", "服务密码（代理服务）", self.deploy_password, True),
-            ("panel_password", "面板密码", self.deploy_password, True),
-            ("management_key", "管理 Key（后台登录）", self.deploy_password, True),
-            ("api_key", "客户端 API Key", self.deploy_api_key, True),
-        ], start=1):
-            row = ttk.Frame(form); row.grid(row=index, column=0, columnspan=2, sticky="w")
-            row.columnconfigure(0, minsize=190)
-            self._field(row, 0, label, variable, private)
-            if name == "port":
-                self.deploy_port_protocol = ttk.Label(row, text="TCP（网页入口）")
-                self.deploy_port_protocol.grid(row=0, column=2, sticky="w", padx=12)
-            if name.endswith("password"):
-                self._button(row, "生成密码", lambda: self._generate_password(self.deploy_password)).grid(row=0, column=2, padx=12)
-            if name in {"management_key", "api_key"}:
-                self._button(row, "生成 Key", lambda v=variable: self._generate_password(v)).grid(row=0, column=2, padx=12)
-            self.deploy_rows[name] = row
-        self.deploy_optional_open = False
-        self.deploy_optional_header = ttk.Frame(page)
-        self.deploy_optional_header.pack(fill="x", pady=(14, 0))
-        self.deploy_optional_toggle = self._button(self.deploy_optional_header, "可选设置", self._toggle_deploy_optional, track=False)
-        self.deploy_optional_toggle.pack(side="left")
-        ttk.Label(self.deploy_optional_header, text="使用域名、调整内部端口或指定版本时展开", style="Muted.TLabel").pack(side="left", padx=14)
-        self.deploy_optional_frame = ttk.Frame(page)
-        self.deploy_optional_rows = {}
-        for index, (name, label, variable, private) in enumerate([
-            ("host", "访问域名（可留空）", self.deploy_host, True),
-            ("backend", "内部端口", self.deploy_backend, False),
-            ("server_name", "REALITY 目标域名", self.deploy_server_name, False),
-        ]):
-            row = ttk.Frame(self.deploy_optional_frame); row.grid(row=index, column=0, sticky="w")
-            row.columnconfigure(0, minsize=190)
-            self._field(row, 0, label, variable, private)
-            if name == "backend":
-                ttk.Label(row, text="TCP · 仅本机，不向公网开放", style="Muted.TLabel").grid(row=0, column=2, sticky="w", padx=12)
-            self.deploy_optional_rows[name] = row
-        auto_row = ttk.Frame(self.deploy_optional_frame); auto_row.grid(row=5, column=0, sticky="w")
-        ttk.Checkbutton(auto_row, text="CLIProxyAPI 自动更新核心和管理页面（每 30 分钟）", variable=self.deploy_auto_update).pack(anchor="w")
-        self.deploy_optional_rows["auto_update"] = auto_row
-        version_row = ttk.Frame(self.deploy_optional_frame); version_row.grid(row=3, column=0, sticky="w")
-        version_row.columnconfigure(0, minsize=190)
-        self.deploy_optional_rows["version_mode"] = version_row
-        self._help_label(version_row, "版本选择").grid(row=0, column=0, sticky="e", padx=(0, 12), pady=6)
-        self.version_box = ttk.Combobox(version_row, textvariable=self.version_mode, values=[LATEST_STABLE, SPECIFIC_VERSION], state="readonly", width=37)
-        self.version_box.grid(row=0, column=1, sticky="w", pady=6)
-        self.version_box.bind("<<ComboboxSelected>>", self._version_fields)
-        version_entry_row = ttk.Frame(self.deploy_optional_frame); version_entry_row.grid(row=4, column=0, sticky="w")
-        version_entry_row.columnconfigure(0, minsize=190)
-        self.deploy_optional_rows["version"] = version_entry_row
-        self.version_entry = self._field(version_entry_row, 0, "安装版本", self.deploy_version)
-        self.version_entry.configure(state="disabled")
-        self.deploy_hint = ttk.Label(page, text="只需确认服务端口。程序密码在首次打开交易系统网页时设置；内部端口使用默认值，安装版本自动获取官方最新稳定版。", style="Muted.TLabel", wraplength=1000)
-        self.deploy_hint.pack(anchor="w", pady=18)
-        actions = ttk.Frame(page); actions.pack(fill="x")
-        self._button(actions, "预览并部署", self._deploy, True).pack(side="left")
-        self._button(actions, "查看访问 / 连接信息", self._details).pack(side="left", padx=12)
-        self.deploy_network_hint = ttk.Label(page, style="Muted.TLabel", wraplength=1000, justify="left")
-        self.deploy_network_hint.pack(anchor="w", pady=18)
-        self.deploy_port.trace_add("write", self._deploy_network_changed)
-        self.deploy_backend.trace_add("write", self._deploy_network_changed)
-        self._deployment_fields()
-
-    def _maintenance_page(self):
-        page = self.pages["日常维护"].content
-        self._description(page, "管理已安装的服务", "每次只操作选中的项目。交易系统停止或重启前，需要确认交易任务已经停止并完成清理。")
-        top = ttk.Frame(page); top.pack(fill="x")
-        self.manage_choice = tk.StringVar(value="小军交易系统")
-        self._help_label(top, "要管理的项目").pack(side="left", padx=(0, 10))
-        project_box = ttk.Combobox(top, textvariable=self.manage_choice, values=[v[0] for v in SERVICES.values()], state="readonly", width=28)
-        project_box.pack(side="left")
-        project_box.bind("<<ComboboxSelected>>", self._project_changed)
-        actions = ttk.Frame(page); actions.pack(fill="x", pady=(12, 0))
-        self._button(actions, "刷新项目信息", self._refresh_project_info).pack(side="left")
-        self._button(actions, "查看运行日志", self._logs).pack(side="left", padx=12)
-        self._button(actions, "安装 / 调整配置", self._configure_project).pack(side="left")
-        information = ttk.LabelFrame(page, text="项目信息 · 可直接复制使用", padding=12); information.pack(fill="x", pady=(12, 8))
-        self.project_info_tree = self._tree(information, [("name", "信息", 240), ("value", "内容", 660), ("qr", "扫码", 60)], height=9)
-        self.project_info_tree.column("qr", width=60, minwidth=60, stretch=False, anchor="center")
-        self.project_info_tree.bind("<<TreeviewSelect>>", self._select_project_info)
-        self.project_info_tree.bind("<ButtonRelease-1>", self._node_qr_clicked)
-        self.project_info_value = tk.StringVar()
-        link_row = ttk.Frame(information); link_row.pack(fill="x", pady=8)
-        ttk.Entry(link_row, textvariable=self.project_info_value, state="readonly").pack(side="left", fill="x", expand=True)
-        self.node_qr_icon = tk.PhotoImage(master=link_row, width=21, height=21)
-        self.node_qr_icon.put("white", to=(0, 0, 21, 21))
-        for x, y in [(1, 1), (13, 1), (1, 13)]:
-            self.node_qr_icon.put(INK, to=(x, y, x+7, y+7)); self.node_qr_icon.put("white", to=(x+1, y+1, x+6, y+6)); self.node_qr_icon.put(INK, to=(x+2, y+2, x+5, y+5))
-        for x, y in [(10, 9), (13, 12), (17, 10), (10, 16), (16, 16), (18, 19)]:self.node_qr_icon.put(INK, to=(x, y, x+2, y+2))
-        self.node_qr_button = self._button(link_row, "展示节点二维码", self._show_selected_node_qr, track=False)
-        self.node_qr_button.button.configure(image=self.node_qr_icon, text="", width=3, state="disabled")
-        self.node_qr_button.pack(side="left", padx=(8, 0))
-        actions = ttk.Frame(information); actions.pack(fill="x")
-        self._button(actions, "复制选中项", self._copy_project_item).pack(side="left")
-        self._button(actions, "复制全部项目信息", self._copy_project_information).pack(side="left", padx=10)
-        self._button(actions, "打开项目网址", self._open_project_url).pack(side="left")
-        self._button(actions, "补充登录信息", self._save_project_credentials).pack(side="left", padx=10)
-        row = ttk.Frame(page); row.pack(fill="x", pady=18)
-        for title, action in [("启动", "start"), ("停止", "stop"), ("重启", "restart"), ("开启开机启动", "enable"), ("关闭开机启动", "disable")]:
-            self._button(row, title, lambda a=action: self._service(a)).pack(side="left", padx=(0, 9))
-        self.ai_maintenance = ttk.Frame(page)
-        for title, action in [("检查并更新 AI", "check_update"), ("开启 AI 自动更新", "enable_update"), ("关闭 AI 自动更新", "disable_update"), ("回滚 AI 核心", "rollback_core")]:
-            self._button(self.ai_maintenance, title, lambda a=action: self._service(a)).pack(side="left", padx=(0, 9))
-        self.ai_oauth = ttk.Frame(page)
-        for title, provider in [("登录 Codex", "codex"), ("登录 Antigravity", "antigravity")]:
-            self._button(self.ai_oauth, title, lambda p=provider: self._oauth(p)).pack(side="left", padx=(0, 9))
-        self.oauth_choices = {spec['label']: name for name, spec in OAUTH_PROVIDERS.items() if name not in {'codex', 'antigravity'}}
-        self.oauth_provider = tk.StringVar(value="Claude")
-        ttk.Combobox(self.ai_oauth, textvariable=self.oauth_provider, values=list(self.oauth_choices), state="readonly", width=16).pack(side="left", padx=(4, 9))
-        self._button(self.ai_oauth, "登录所选提供商", lambda: self._oauth(self.oauth_choices[self.oauth_provider.get()])).pack(side="left")
-        self.ai_clients = ttk.LabelFrame(page, text="本机客户端 · 配置与恢复", padding=12)
-        client_actions = ttk.Frame(self.ai_clients); client_actions.pack(fill="x")
-        for client, title in CLIENTS.items():
-            label = "一键配置 GPT" if client == "codex" else "一键配置 " + title
-            self._button(client_actions, label, lambda name=client: self._configure_local_client(name)).pack(side="left", padx=(0, 9))
-        restore_clients = ttk.Frame(self.ai_clients); restore_clients.pack(fill="x", pady=(10, 0))
-        self.local_client_choice = tk.StringVar(value=CLIENTS["codex"])
-        ttk.Combobox(restore_clients, textvariable=self.local_client_choice, values=list(CLIENTS.values()), state="readonly", width=19).pack(side="left", padx=(0, 9))
-        self._button(restore_clients, "恢复原客户端配置", self._restore_local_client).pack(side="left")
-        self._button(restore_clients, "选择已安装应用", self._choose_local_client_application).pack(side="left", padx=(9, 0))
-        ttk.Label(self.ai_clients, text="只配置这台电脑；自动备份，可恢复到首次配置前或任一历史版本。配置后需重启客户端。", style="Muted.TLabel", wraplength=920).pack(anchor="w", pady=(8, 0))
-        removal = ttk.Frame(page); self.maintenance_removal = removal; removal.pack(fill="x", pady=(0, 8))
-        self._button(removal, "卸载所选项目", self._uninstall).pack(side="left")
-        ttk.Label(removal, text="移除程序和专属服务，默认保留配置、账号及业务数据。", style="Muted.TLabel", wraplength=640).pack(side="left", padx=12)
-        security = ttk.LabelFrame(page, text="安全与配置备份", padding=12); security.pack(fill="x", pady=8)
-        self._button(security, "备份所选服务配置", self._backup).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 8))
-        self._button(security, "备份安全配置", lambda: self._backup("security")).grid(row=0, column=1, sticky="w", pady=(0, 8))
-        self._button(security, "启用防火墙并保留现有规则", self._firewall).grid(row=1, column=0, sticky="w", padx=(0, 10))
-        self._button(security, "开启自动安全更新", self._updates).grid(row=1, column=1, sticky="w")
-        restore = ttk.Frame(page); restore.pack(fill="x", pady=18)
-        self._help_label(restore, "备份编号").pack(side="left", padx=(0, 10))
-        self.restore_id = tk.StringVar()
-        ttk.Entry(restore, textvariable=self.restore_id, width=32).pack(side="left")
-        self._button(restore, "预览并恢复配置", self._restore).pack(side="left", padx=12)
-        self.maintenance_text = tk.Text(page, height=11, wrap="word", bg="white", foreground=INK, font="TkDefaultFont", relief="flat", padx=14, pady=14, state="disabled")
-        self.maintenance_text.pack(fill="both", expand=True)
-        self._replace_text(self.maintenance_text, "服务日志会在这里显示。\n备份保存在服务器，仅管理员可读取。恢复前会再备份当前配置。\n业务系统的账号、交易账本及运行数据使用其自身备份机制。")
-
-    def _history_page(self):
-        page = self.pages["操作记录"].content
-        self._description(page, "进度、结果与恢复记录", "后台任务在服务器执行。重新连接后可以刷新记录，查看上次任务的结果；断线时请勿重复部署。")
-        row = ttk.Frame(page); row.pack(fill="x", pady=(0, 12))
-        self._button(row, "刷新记录", self._tasks).pack(side="left")
-        self._button(row, "查看任务详情", self._task_detail).pack(side="left", padx=10)
-        self._button(row, "恢复待验证变更", self._recover).pack(side="left")
-        self._button(row, "查看本次新密码", self._task_password).pack(side="left", padx=10)
-        self.task_tree = self._tree(page, [("id", "任务编号", 235), ("operation", "操作", 145), ("state", "状态", 160), ("message", "结果", 440)], height=7)
-        self.task_text = tk.Text(page, height=9, wrap="word", bg="white", foreground=INK, font="TkDefaultFont", relief="flat", padx=14, pady=14, state="disabled")
-        self.task_text.pack(fill="both", expand=True, pady=(15, 0))
 
     def _tree(self, parent, columns, height):
         tree = ttk.Treeview(parent, columns=[c[0] for c in columns], show="headings", height=height)
@@ -989,25 +558,6 @@ class App(tk.Tk):
         if "account_server_box" in self.__dict__:
             self._account_servers()
 
-    def _account_servers(self):
-        groups = {}
-        for profile in self.profiles:
-            groups.setdefault(server_key(profile), profile)
-        if self.current and self.current.host:
-            groups[server_key(self.current)] = self.current
-        self.account_server_map = list(groups.values())
-        self.account_server_box["values"] = [f"{index + 1}. {profile.label}" + ("" if self.privacy.get() else " · " + profile.host) for index,profile in enumerate(self.account_server_map)]
-        if self.current:
-            for index,profile in enumerate(self.account_server_map):
-                if server_key(profile)==server_key(self.current):
-                    self.account_server_box.current(index);break
-
-    def _clear_account_view(self):
-        self.account_map = {}; self.account_detail = None
-        sync_tree(self.account_tree, [])
-        self.account_count.configure(text="尚未读取这台服务器的用户。")
-        self.account_server_status.configure(text="请连接所选服务器后读取用户。")
-        self._replace_text(self.account_detail_text, "每次只显示所选服务器的账号；切换后不会沿用上一台服务器的用户或权限信息。")
 
     def _choose_account_server(self, _=None):
         if self.busy:return
@@ -1177,19 +727,14 @@ class App(tk.Tk):
         def worker():
             self.profile_load_stage = "profiles"
             profiles = self.store.profiles()
-            self.profile_load_stage = "project_credentials"
-            for profile in profiles:
-                for kind in ["exchange", "hysteria2", "xui", "cliproxyapi"]:
-                    self.store.vault.get(credential_alias(profile, kind))
-                    if kind in {"hysteria2", "xui", "cliproxyapi"}:
-                        from .vault import vault_alias
-                        self.store.vault.get(vault_alias("service-pending", credential_alias(profile, kind)))
+            self._saved_project_snapshots = self.controller.cached_projects(profiles)
             self.profile_load_stage = "key_metadata"
             keys = {p.key_path: encrypted_key(p.key_path) for p in profiles if p.key_path}
             self.profile_load_stage = "queued"
             return profiles, keys
         def done(data):
             self.profiles, self.key_encryption = data
+            self._restore_project_snapshots(self.__dict__.pop("_saved_project_snapshots", {}))
             self.profiles_loaded = True
             self.profile_load_stage = "ready"
             self._profile_options()
@@ -1197,7 +742,9 @@ class App(tk.Tk):
                 self._load_profile(self.profiles[0])
             else:
                 self._plan_mode_changed()
-            self.status.configure(text="本机档案已就绪。选择服务器后连接，或查看功能说明。")
+            saved = bool(self.__dict__.get("external_catalogs"))
+            self.status.configure(text=("本机档案与上次项目信息已恢复；需要更新时手动刷新。" if saved else "本机档案已就绪。选择服务器后连接，或查看功能说明。") +
+                                  " ".join(self.__dict__.get("project_cache_warnings", [])))
             if self.store.last_warning:
                 messagebox.showwarning("本机登录信息", self.store.last_warning, parent=self)
             self._record_window_state()
@@ -1310,6 +857,8 @@ class App(tk.Tk):
                     messagebox.showerror("操作未完成", value, parent=self)
                 elif callback:
                     callback(value)
+                if "manage_project_box" in self.__dict__:
+                    self._manage_action_states()
         except queue.Empty:
             pass
         finally:
@@ -1421,129 +970,6 @@ class App(tk.Tk):
         self._run(lambda: self.controller.open_terminal(connection), done,
                   "正在打开当前服务器的命令行…")
 
-    def _render_report(self):
-        if not self.report: return
-        r = self.report
-        self.system_label.configure(text=r["os"] + " · " + r["architecture"])
-        self.statistics["disk"].configure(text=readable_size(r["disk_free"]))
-        self.statistics["memory"].configure(text=readable_size(r["memory"].get("MemAvailable", 0)))
-        count = sum(any(u.get("ActiveState") == "active" for u in units) and not r.get("project_information", {}).get(key, {}).get("data", {}).get("uninstalled") for key, units in r["services"].items())
-        self.statistics["services"].configure(text=str(count))
-        password_enabled = "yes" in r["ssh"].get("passwordauthentication", [])
-        self.statistics["security"].configure(text="密码 / 密钥" if password_enabled else "密钥")
-        self.allow_password.set(password_enabled)
-        self.allow_root.set("yes" in r["ssh"].get("permitrootlogin", []))
-        service_rows = []
-        purposes = {"exchange": "币安多账号交易、资产查询和资金管理", "hysteria2": "Hysteria2 网络代理服务", "reality": "独立 VLESS + REALITY + Vision 节点", "xui": "代理账号与节点的网页管理", "nginx": "网页入口、HTTPS 和后端转发", "cliproxyapi": "AI 接口转发、账号管理与自动更新"}
-        for key, units in r["services"].items():
-            installed = [u for u in units if u.get("LoadState") == "loaded"]
-            state = "运行中" if any(u.get("ActiveState") == "active" for u in installed) else "已停止" if installed else "尚未安装"
-            startup = "已开启" if any(u.get("UnitFileState") == "enabled" for u in installed) else "未开启" if installed else "—"
-            if r.get("project_information", {}).get(key, {}).get("data", {}).get("uninstalled"):
-                state = "独立站点已卸载" if key == "nginx" else "已卸载（数据保留）"
-                startup = "—"
-            service_rows.append((key, (SERVICES[key][0], state, startup, purposes[key])))
-        sync_tree(self.service_tree, service_rows)
-        self._render_accounts()
-        root_allowed = "yes" in r["ssh"].get("permitrootlogin", [])
-        summary = "防火墙：" + ("已启用" if r["firewall"]["active"] else "未启用") + "    安全更新：" + ("已启用" if r["automatic_updates"] else "未就绪") + "    超级管理员 SSH 密码登录：" + ("允许" if root_allowed and password_enabled else "禁止")
-        self.security_summary.configure(text=summary + ("\n当前系统暂不支持自动部署；仍可检查已安装服务。" if not r["supported"] else ""))
-        self.protection_status.configure(text=summary + "    防猜密码：" + ("已启用" if r.get("fail2ban", {}).get("active") else "未启用本程序保护"))
-        for variable, field, default in [(self.auth_tries, "maxauthtries", "3"), (self.login_grace, "logingracetime", "120"), (self.alive_interval, "clientaliveinterval", "0")]:
-            variable.set(r["ssh"].get(field, [default])[0])
-        for variable, field in [(self.tcp_forwarding, "allowtcpforwarding"), (self.x11_forwarding, "x11forwarding"), (self.agent_forwarding, "allowagentforwarding")]:
-            variable.set(r["ssh"].get(field, ["no"])[0] != "no")
-        self._show_tasks(r.get("tasks", []))
-
-    def _select_account(self, _=None):
-        selection = self.account_tree.selection()
-        if selection and selection[0] in self.account_map:
-            self.account_user.set(self.account_map[selection[0]])
-            self._show_account_detail()
-
-    def _render_accounts(self):
-        if not self.report: return
-        if self.report_server_key != server_key(self.current):
-            self._clear_account_view(); return
-        self.account_server_status.configure(text="当前服务器：" + (self.current.label if self.privacy.get() else self.current.label + " · " + self.current.host))
-        selected = self.account_map.get(next(iter(self.account_tree.selection()), ""))
-        self.account_map = {}
-        tree_rows = []
-        selected_id = None
-        rows = self.report["accounts"]
-        system_count = sum(u.get("system", u["uid"] != 0 and not 1000 <= u["uid"] < 65534) for u in rows)
-        self.account_count.configure(text=f"全部 {len(rows)} 个用户 · 系统账号 {system_count} 个 · 管理员 {sum(u['admin'] for u in rows)} 个")
-        for i, account in enumerate(rows):
-            system = account.get("system", account["uid"] != 0 and not 1000 <= account["uid"] < 65534)
-            if system and not self.show_system_accounts.get(): continue
-            name = f"账号 {i + 1}" if self.privacy.get() else account["username"]
-            role = "超级管理员" if account["uid"] == 0 else "系统服务账号" if system else "普通管理员" if account["admin"] else "普通账号"
-            access = "本程序已禁止" if account.get("managed_blocked") else "配置已禁止" if account.get("ssh_denied") else "详见账号策略"
-            row_id = self.report_server_key + ":" + str(i)
-            tree_rows.append((row_id, (name, role, str(account["key_count"]) + " 把", {"set": "已设置", "locked": "已锁定", "empty": "未设置"}.get(account["password_state"], "未知"), access)))
-            self.account_map[row_id] = account["username"]
-            if selected == account["username"]: selected_id = row_id
-        sync_tree(self.account_tree, tree_rows)
-        if selected_id is not None:
-            if self.account_tree.selection() != (selected_id,): self.account_tree.selection_set(selected_id)
-        elif self.account_tree.selection():
-            self.account_tree.selection_remove(*self.account_tree.selection())
-        self._show_account_detail()
-
-    def _selected_account(self):
-        if self.report_server_key != server_key(self.current):
-            raise ManagerError("请先刷新所选服务器的用户列表。")
-        selected = self.account_tree.selection()
-        if not selected or selected[0] not in self.account_map:
-            raise ManagerError("请先在用户列表里选中一个账号。")
-        return self.account_map[selected[0]]
-
-    def _account_info(self, account):
-        row = next(u for u in self.report["accounts"] if u["username"] == account)
-        detail = self.account_detail if self.account_detail and self.account_detail.get("username") == account and self.account_detail.get("server_id") == self.current.identifier else None
-        data = detail or row
-        ssh = data.get("ssh", self.report.get("ssh", {}))
-        policy = "按所选账号查询" if detail else "全局概览；点击查看详情核对账号条件"
-        def value(key):
-            translations = {"yes": "允许", "no": "禁止", "publickey": "密钥", "any": "任一已开启方式", "prohibit-password": "禁止密码（仍可用密钥）", "without-password": "禁止密码（仍可用密钥）", "force-commands-only": "仅限指定命令", "local": "仅本地隧道", "remote": "仅远端隧道"}
-            return " / ".join(translations.get(v, v) for v in ssh.get(key, [])) or "未单独限制"
-        paths = data.get("local_private_keys", [p.key_path for p in self.profiles if p.host == self.current.host and p.username == account and p.auth == "key" and p.key_path])
-        text = f"登录名：{account}\nUID / GID：{data['uid']} / {data.get('gid', '未知')}\n用户组：{', '.join(data.get('groups', [])) or '未知'}\n家目录：{data.get('home', '未知')}\n登录 Shell：{data.get('shell', '未知')}\n系统密码：" + {"set": "已设置", "locked": "已锁定（不等于禁用所有密钥）", "empty": "空密码"}.get(data["password_state"], "未知")
-        text += "\n权限：" + data.get("sudo_policy", "管理员组成员" if data["admin"] else "普通或系统账号")
-        text += f"\nSSH 策略（{policy}）：\n密码认证：{value('passwordauthentication')}；交互认证：{value('kbdinteractiveauthentication')}；密钥认证：{value('pubkeyauthentication')}\n认证组合要求：{value('authenticationmethods')}；超级管理员登录：{value('permitrootlogin')}\n允许账号：{value('allowusers')}；禁止账号：{value('denyusers')}\n允许用户组：{value('allowgroups')}；禁止用户组：{value('denygroups')}\n公钥文件：{value('authorizedkeysfile')}\n认证次数：{value('maxauthtries')}；等待秒数：{value('logingracetime')}；隧道转发：{value('allowtcpforwarding')}"
-        text += "\n本程序登录禁用：" + ("是" if data.get("managed_blocked") else "否")
-        if detail:
-            expiry = str(detail.get("account_expiry", "未设定"))
-            if expiry.isdigit():
-                try:
-                    expiry = (datetime.date(1970, 1, 1) + datetime.timedelta(days=int(expiry))).isoformat()
-                except (ValueError, OverflowError):
-                    expiry = "日期超出可显示范围，请核对账号配置"
-            text += "\n查询范围：" + detail.get("policy_scope", "") + "\n账号过期日期：" + expiry
-            text += "\n公钥指纹：" + ("；".join(data.get("public_key_fingerprints", [])) or "标准公钥文件未发现钥匙")
-        key_lines = []
-        for path in paths:
-            state = self.key_encryption.get(path)
-            key_lines.append(path + "（" + ("已加密" if state is True else "未加密，可用一键方案更换" if state is False else "点击查看详情检查加密状态") + "）")
-        text += "\n本机保存的私钥：\n" + ("\n".join(key_lines) if paths else "这台电脑没有该账号的私钥记录。服务器只有公钥，无法得知其他电脑的私钥位置。")
-        text += "\n密码、私钥内容及私钥口令不包含在可复制信息中。登录能否成功还取决于账号状态、公钥选项、防火墙和云平台规则。"
-        return text
-
-    def _show_account_detail(self):
-        if not self.report: return
-        try:
-            account = self._selected_account()
-            text = self._account_info(account)
-            if self.privacy.get():
-                secrets_to_hide = [self.current.host]
-                for row in self.report["accounts"]:
-                    secrets_to_hide += [row["username"], row.get("home", "")]
-                secrets_to_hide += [p.key_path for p in self.profiles if p.key_path]
-                text = Redactor(*secrets_to_hide).text(text)
-                text = "信息已隐藏；关闭右上角隐藏开关可查看真实账号和本机私钥位置。\n" + text
-        except ManagerError:
-            text = "先选中账号；可点击查看详情、复制信息或删除选中用户。"
-        self._replace_text(self.account_detail_text, text)
 
     def _refresh_accounts(self):
         if not self._ready(): return
@@ -1777,106 +1203,64 @@ class App(tk.Tk):
         except ManagerError as error:
             messagebox.showerror("检查输入", str(error), parent=self)
 
-    def _service_key(self, choice):
-        return next(key for key, value in SERVICES.items() if value[0] == choice)
 
-    def _deploy_defaults(self, _=None):
-        key = self._service_key(self.deploy_choice.get())
-        defaults = {"exchange": (26483, "部署前自动获取"), "hysteria2": (51752, "v1.14.2"), "reality": (443, "v26.3.27"), "xui": (2053, "v3.9.0"), "nginx": (80, "系统软件包"), "cliproxyapi": (9229, "部署前自动获取")}
-        number, version = defaults[key]; self.deploy_port.set(str(number)); self.deploy_version.set(version)
-        self.version_mode.set(LATEST_STABLE)
-        current = self._deployment_current(key)
-        if current:
-            self.deploy_port.set(str(current.get("port", number)))
-            self.deploy_host.set(current.get("host", ""))
-            self.deploy_version.set(current.get("version") or "预览时读取现有版本")
-            self.version_mode.set(KEEP_CURRENT)
-            if key == "exchange": self.deploy_backend.set(str(current.get("backend_port", 18880)))
-            if key == "cliproxyapi":
-                self.deploy_backend.set(str(current.get("backend_port", 8317)))
-                self.deploy_password.set(self.store.vault.cache.get(credential_alias(self.current, key), {}).get("management_key", ""))
-                self.deploy_api_key.set(next(iter(current.get("api_keys", [])), ""))
-                self.deploy_auto_update.set(current.get("timers", {}).get("linux-manager-cliproxyapi-update.timer", {}).get("UnitFileState") == "enabled")
-            if key == "reality": self.deploy_server_name.set(current.get("server_name", "www.cloudflare.com"))
-            if key == "hysteria2": self.deploy_password.set(current.get("proxy_password", ""))
-            if key == "xui":
-                self.deploy_username.set(current.get("panel_username", ""))
-                values = self.store.vault.cache.get(credential_alias(self.current, key), {})
-                self.deploy_password.set(values.get("panel_password", ""))
-        else:
-            self.deploy_host.set("")
-            self.deploy_password.set("")
-            self.deploy_username.set("manager")
-            self.deploy_backend.set("8317" if key == "cliproxyapi" else "18880")
-            if key == "cliproxyapi":
-                self.deploy_password.set(secrets.token_urlsafe(32))
-                self.deploy_api_key.set(secrets.token_urlsafe(32))
-                self.deploy_auto_update.set(True)
-            self.deploy_server_name.set("www.cloudflare.com")
-        self._deployment_fields()
-        hints = {"exchange": "确认 TCP 网页端口即可。已有项目先比对条件，只调整改变的配置；版本变化会备份并切换版本，保留业务数据。", "hysteria2": "填写 UDP 节点端口和服务密码；HY2 不使用 TCP 节点端口。已有项目会按新条件调整；原密码不变时可以留空。", "reality": "只填 TCP 节点端口；连接凭据自动生成，无需自有域名和证书。部署后在运行与备份复制 VLESS 节点链接，或点击二维码图标扫码导入。已有节点调整端口或版本时保留原凭据。", "xui": "填写 TCP 面板端口、面板账号和密码；节点端口另按各自协议放行。已有项目的密码不变时可留空；节点和订阅保持。", "nginx": "默认 TCP 80，可填写其他端口。版本使用系统软件源；已有配置会先备份，网站文件保留。"}
-        hints["cliproxyapi"] = "默认使用 IP＋HTTPS，无需域名。管理 Key 用于后台登录；客户端 Key 可供多设备共用。添加上游账号后才能调用模型。自动更新运行在服务器上。"
-        self.deploy_hint.configure(text=hints[key])
+    def _external_projects(self):
+        if self.busy or not self._ready(): return
+        from .external_projects import ExternalProjects
+        c = self.current; identity = server_key(c)
+        selected = self._service_key(self.manage_choice.get())
+        def done(result):
+            if not self.current or server_key(self.current) != identity: return
+            projects = {p["id"]: p for p in result["projects"] if p["kind"] != "builtin"}
+            previous = self.__dict__.setdefault("external_catalogs", {}).get(identity, {})
+            if result.get("warnings"): projects = dict(previous, **projects)
+            for removed in previous.keys() - projects.keys():
+                self.project_details.pop((identity, removed), None)
+                self.project_logs.pop((identity, removed), None)
+            self.external_catalogs[identity] = projects
+            for key, information in result.get("builtin_information", {}).items():
+                self.project_details[(identity, key)] = information
+            for project in result["projects"]:
+                if project["kind"] == "builtin":
+                    self.project_details[(identity, project["service"])] = project["information"]
+                else:
+                    cached = self.project_details.get((identity, project["id"]), {}).get("external", {})
+                    self._cache_external_information(c, dict(cached, project=project, fingerprint=ExternalProjects.fingerprint(project), saved_at=""))
+            self._sync_manage_projects()
+            label = next((label for label, key in self.manage_project_labels.items() if key == selected), None)
+            if label: self.manage_choice.set(label)
+            self._project_changed()
+            self.status.configure(text="已读取 " + str(len(result["projects"])) + " 个已安装项目，已更新项目下拉列表。" + " ".join(dict.fromkeys(result.get("warnings", []))))
+        self._run(lambda: self.controller.external_projects(c, include_builtin=True), done, "刷新读取服务器项目，更新下拉列表…")
 
-    def _deployment_current(self, key):
-        c = self.__dict__.get("current")
-        if c is None or self.__dict__.get("report_server_key") != server_key(c): return {}
-        information = self.__dict__.get("project_details", {}).get((server_key(c), key), {})
-        data = information.get("data", {})
-        return data if (data.get("installed") or data.get("uninstalled")) and (key != "nginx" or data.get("config_file")) else {}
+    def _register_external_directory(self):
+        if self.busy or not self._ready(): return
+        c = self.current
+        path = simpledialog.askstring("登记安装目录", "填写服务器上的项目目录（例如 /opt/my-app）；只读取目录与公开版本信息。", parent=self)
+        if not path: return
+        def done(project):
+            if not self.current or server_key(self.current) != server_key(c): return
+            from .external_projects import ExternalProjects
+            self._cache_external_information(c, {"project": project, "fingerprint": ExternalProjects.fingerprint(project)})
+            self._sync_manage_projects()
+            self.manage_choice.set(next(label for label, key in self.manage_project_labels.items() if key == project["id"]))
+            self._project_changed()
+        self._run(lambda: self.controller.register_external_directory(c, path), done, "核对服务器项目目录…")
 
-    def _sync_deployment_server(self, c):
-        if "deploy_choice" in self.__dict__ and self.__dict__.get("deployment_context") != server_key(c):
-            self.deployment_context = server_key(c)
-            self._deploy_defaults()
+    def _forget_external_directory(self):
+        if self.busy or not self._ready(): return
+        c = self.current; key = self._service_key(self.manage_choice.get()); identity = server_key(c)
+        info = self.project_details.get((identity, key), {}).get("external", {})
+        if not info.get("project", {}).get("registered_local"): return
+        if not messagebox.askyesno("移除本机登记", "仅移除本机目录登记；服务器项目、数据与本机凭据记录均保留。是否继续？", parent=self): return
+        def done(_):
+            self.__dict__.get("external_catalogs", {}).get(identity, {}).pop(key, None)
+            self.project_details.pop((identity, key), None)
+            if self.current and server_key(self.current) == identity:
+                self._project_changed()
+                self.status.configure(text="已移除本机登记；服务器文件和本机凭据均保留。")
+        self._run(lambda: self.controller.forget_external_directory(c, key), done, "移除本机目录登记…")
 
-    def _deployment_fields(self):
-        key = self._service_key(self.deploy_choice.get())
-        visible = {"exchange": {"port"}, "hysteria2": {"port", "proxy_password"}, "reality": {"port"}, "xui": {"port", "username", "panel_password"}, "nginx": {"port"}, "cliproxyapi": {"port", "management_key", "api_key"}}[key]
-        for name, row in self.deploy_rows.items():
-            row.grid() if name in visible else row.grid_remove()
-        for name, row in self.deploy_optional_rows.items():
-            shown = name == "host" and key != "nginx" or name == "backend" and key in {"exchange", "cliproxyapi"} or name == "server_name" and key == "reality" or name == "version_mode" or name == "auto_update" and key == "cliproxyapi"
-            if name != "version":
-                row.grid() if shown else row.grid_remove()
-        self.deploy_optional_header.pack(fill="x", pady=(14, 0), before=self.deploy_hint)
-        if self.deploy_optional_open:
-            self.deploy_optional_frame.pack(fill="x", pady=(8, 0), before=self.deploy_hint)
-        self.deploy_network_hint.pack(anchor="w", pady=18)
-        self._deploy_network_changed()
-        self._version_fields()
-
-    def _deploy_network_changed(self, *_):
-        key = self._service_key(self.deploy_choice.get())
-        purpose = "HY2 节点" if key == "hysteria2" else "REALITY 节点" if key == "reality" else "面板网页" if key == "xui" else "网页入口"
-        self.deploy_port_protocol.configure(text=SERVICE_PROTOCOLS[key]+"（"+purpose+"）")
-        self.deploy_network_hint.configure(text=deployment_network_hint(key, self.deploy_port.get().strip(), self.deploy_backend.get().strip()))
-
-    def _toggle_deploy_optional(self):
-        self.deploy_optional_open = not self.deploy_optional_open
-        if self.deploy_optional_open:
-            self.deploy_optional_frame.pack(fill="x", pady=(8, 0), before=self.deploy_hint)
-        else:
-            self.deploy_optional_frame.pack_forget()
-        self.deploy_optional_toggle.button.configure(text="收起可选设置" if self.deploy_optional_open else "可选设置")
-
-    def _version_fields(self, _=None):
-        key = self._service_key(self.deploy_choice.get())
-        automatic = self.version_mode.get() == LATEST_STABLE
-        keeping = self.version_mode.get() == KEEP_CURRENT
-        choices = [LATEST_STABLE, SPECIFIC_VERSION]
-        if self._deployment_current(key): choices.insert(0, KEEP_CURRENT)
-        self.version_box.configure(state="readonly", values=choices)
-        self.version_entry.configure(state="disabled" if automatic or keeping else "normal")
-        if automatic:
-            self.deploy_version.set("部署前自动获取" if key != "nginx" else "预览时读取系统仓库版本")
-        elif not keeping and key != "nginx" and not self.deploy_version.get().startswith("v"):
-            self.deploy_version.set({"exchange":"v1.1.85", "hysteria2":"v1.14.3", "reality":"v26.3.27", "xui":"v3.9.0", "cliproxyapi":"v8.0.27"}[key])
-        elif not keeping and key == "nginx" and self.deploy_version.get().startswith(("预览", "系统")):
-            self.deploy_version.set("")
-        if "deploy_optional_rows" in self.__dict__:
-            row = self.deploy_optional_rows["version"]
-            row.grid_remove() if automatic else row.grid()
 
     def _deploy(self):
         if not self._ready(): return
@@ -1946,6 +1330,28 @@ class App(tk.Tk):
 
     def _service(self, action):
         key = self._service_key(self.manage_choice.get())
+        if key.startswith("external:"):
+            if self.busy or not self._ready(): return
+            c = self.current; identity = server_key(c)
+            info = self.project_details.get((identity, key), {}).get("external", {})
+            project = info.get("project", {})
+            if action not in project.get("capabilities", []) or not info.get("fingerprint"):
+                self.status.configure(text="该项目暂不支持此操作，请使用原有启动方式。")
+                return
+            labels = {"start": "启动", "stop": "停止", "restart": "重启", "enable": "开启自启", "disable": "关闭自启"}
+            if not messagebox.askyesno("确认项目操作", "服务器：" + c.label + "\n项目：" + project["name"] +
+                                      "\n操作：" + labels[action] + "\n\n停止或重启会中断该项目的连接；是否执行？", parent=self): return
+            params = {"operation": "service", "service": key, "action": action, "external_fingerprint": info["fingerprint"]}
+            def done(result):
+                status, _ = result
+                updated = status.get("result", {}).get("external_project")
+                if updated and self.current and server_key(self.current) == identity:
+                    self._cache_external_information(c, dict(info, project=updated))
+                    self._project_changed()
+                    self.status.configure(text="项目操作已完成，已核对状态；记录已保存到操作记录。")
+            self._run(lambda: self.controller.execute(c, params), done, "执行已确认的项目操作…")
+            return
+        if key not in SERVICES: return
         params = {"operation": "service", "service": key, "action": action}
         if key == "exchange" and action in {"stop", "restart"}:
             if not messagebox.askyesno("确认维护条件", "请先在交易网页停止任务并确认撤单及清理完成。\n是否已经完成？", parent=self): return
@@ -1962,6 +1368,9 @@ class App(tk.Tk):
     def _uninstall(self):
         if self.busy or not self._ready(): return
         c = self.current; kind = self._service_key(self.manage_choice.get())
+        if kind not in SERVICES:
+            self.status.configure(text="外部项目请使用原有卸载方式；本程序不会删除其文件或数据。")
+            return
         params = {"operation": "uninstall", "service": kind, "keep_data": True}
         def done(plan):
             if not self.current or server_key(self.current) != server_key(c):
@@ -1986,6 +1395,7 @@ class App(tk.Tk):
     def _logs(self):
         if not self._ready(): return
         key = self._service_key(self.manage_choice.get()); c = self.current
+        if not key: return
         redactor = self._redactor()
         info = self.project_details.get((server_key(c),key), {})
         for name,value in info.get("rows",[]):
@@ -1996,59 +1406,25 @@ class App(tk.Tk):
             self.project_logs[(server_key(c),key)] = text
             if self.current and server_key(self.current)==server_key(c) and self._service_key(self.manage_choice.get())==key:
                 self._replace_text(self.maintenance_text, text)
-        self._run(lambda: self.controller.transport(c).call({"action": "logs", "service": key}), done)
+        request = {"action": "external_logs", "identifier": key} if key.startswith("external:") else {"action": "logs", "service": key}
+        self._run(lambda: self.controller.transport(c).call(request), done)
 
-    def _project_changed(self, _=None):
-        key = self._service_key(self.manage_choice.get())
-        identity = server_key(self.current) if self.current else ""
-        information = self.project_details.get((identity,key), {})
-        if "ai_maintenance" in self.__dict__:
-            if key == "cliproxyapi": self.ai_maintenance.pack(fill="x", pady=(0, 10), before=self.maintenance_removal)
-            else: self.ai_maintenance.pack_forget()
-        if "ai_oauth" in self.__dict__:
-            if key == "cliproxyapi": self.ai_oauth.pack(fill="x", pady=(0, 10), before=self.maintenance_removal)
-            else: self.ai_oauth.pack_forget()
-        if "ai_clients" in self.__dict__:
-            if key == "cliproxyapi": self.ai_clients.pack(fill="x", pady=(0, 10), before=self.maintenance_removal)
-            else: self.ai_clients.pack_forget()
-        self.project_rows = list(information.get("rows", []))
-        hidden = self.privacy.get()
-        sync_tree(self.project_info_tree, [(str(i),(name,"已隐藏；关闭右上角隐藏开关可查看" if hidden and name not in {"项目状态","安装版本","端口协议"} else value, "▦" if is_node_link(value) else "")) for i,(name,value) in enumerate(self.project_rows)])
-        self.project_info_value.set("")
-        if "node_qr_button" in self.__dict__: self.node_qr_button.configure(state="disabled")
-        if not self.project_rows:
-            sync_tree(self.project_info_tree, [("placeholder",("项目信息","连接服务器后点击刷新；只显示当前服务器的项目。"))])
-        self._replace_text(self.maintenance_text,self.project_logs.get((identity,key),"所选项目的运行日志会在这里显示。点击「查看运行日志」读取。"))
 
     def _refresh_project_info(self):
         if not self._ready(): return
         c = self.current; key = self._service_key(self.manage_choice.get())
+        if not key: return
         def done(information):
-            self.project_details[(server_key(c),key)] = information
+            if key.startswith("external:"):
+                if not self.current or server_key(self.current) != server_key(c): return
+                self._cache_external_information(c, information)
+            else: self.project_details[(server_key(c),key)] = information
             if self.current and server_key(self.current)==server_key(c) and self._service_key(self.manage_choice.get())==key:
                 self._project_changed()
             self.status.configure(text="项目信息已刷新；选中一项可复制完整内容。")
-        self._run(lambda:self.controller.project_information(c,key),done,"读取项目端口、网址及连接信息…")
+        worker = (lambda: self.controller.external_project_information(c, key)) if key.startswith("external:") else (lambda: self.controller.project_information(c, key))
+        self._run(worker, done, "读取项目端口、网址及连接信息…")
 
-    def _select_project_info(self, _=None):
-        selected = self.project_info_tree.selection()
-        if selected and selected[0].isdigit() and int(selected[0])<len(self.project_rows):
-            value = self.project_rows[int(selected[0])][1]
-            self.project_info_value.set("已隐藏" if self.privacy.get() else value)
-            if "node_qr_button" in self.__dict__: self.node_qr_button.configure(state="normal" if is_node_link(value) else "disabled")
-
-    def _node_qr_clicked(self, event):
-        if self.project_info_tree.identify_column(event.x) != "#3":return
-        row = self.project_info_tree.identify_row(event.y)
-        if row.isdigit() and int(row) < len(self.project_rows) and is_node_link(self.project_rows[int(row)][1]):
-            self.project_info_tree.selection_set(row)
-            self._show_node_qr(self.project_rows[int(row)][1])
-
-    def _show_selected_node_qr(self):
-        selected = self.project_info_tree.selection()
-        if selected and selected[0].isdigit() and int(selected[0]) < len(self.project_rows):
-            value = self.project_rows[int(selected[0])][1]
-            if is_node_link(value):self._show_node_qr(value)
 
     def _show_node_qr(self, value):
         try:
@@ -2064,23 +1440,6 @@ class App(tk.Tk):
         ttk.Label(frame, text="二维码包含完整节点凭据，请仅供自己的设备扫描。", wraplength=380, justify="center").pack()
         self._button(frame, "复制节点链接", lambda:self._copy(value), track=False).pack(pady=(12, 0))
 
-    def _copy_project_item(self):
-        selected = self.project_info_tree.selection()
-        if selected and selected[0].isdigit() and int(selected[0])<len(self.project_rows):
-            self._copy(self.project_rows[int(selected[0])][1])
-        else:
-            self.status.configure(text="请先选中需要复制的信息。")
-
-    def _copy_project_information(self):
-        if self.project_rows:
-            self._copy("\n".join(name+"："+value for name,value in self.project_rows))
-
-    def _open_project_url(self):
-        url = next((value for name,value in self.project_rows if name in {"后台网址","软件网址"}),"")
-        if url.startswith(("https://","http://")):
-            webbrowser.open(url)
-        else:
-            self.status.configure(text="所选项目没有网页入口；请复制节点或订阅链接使用。")
 
     def _client_configurator(self):
         return ClientConfigurator(self.store.directory / "client-config-backups")
@@ -2307,6 +1666,23 @@ class App(tk.Tk):
     def _save_project_credentials(self):
         if not self._ready(): return
         key = self._service_key(self.manage_choice.get()); c = self.current
+        if key.startswith("external:"):
+            if self.busy: return
+            from .external_projects_gui import credentials_dialog
+            def show(information):
+                if not self.current or server_key(self.current) != server_key(c) or self._service_key(self.manage_choice.get()) != key: return
+                self._cache_external_information(c, information)
+                def saved(values):
+                    if not self.current or server_key(self.current) != server_key(c): return
+                    current = self.project_details.get((server_key(c), key), {}).get("external", information)
+                    self._cache_external_information(c, dict(current, credentials=values, credentials_warning=""))
+                    self._project_changed()
+                    self.status.configure(text="登录记录已保存到本机钥匙串；服务器账号未修改。")
+                credentials_dialog(self, c, information, saved)
+            information = self.project_details.get((server_key(c), key), {}).get("external", {})
+            if "credentials" in information and not information.get("credentials_warning"): show(information)
+            else: self._run(lambda: self.controller.external_project_information(c, key), show, "读取当前项目的本机登录记录…")
+            return
         if key == "cliproxyapi":
             secret = simpledialog.askstring("补充管理 Key", "填写现有管理 Key；验证后保存到本机钥匙串，不修改服务器。", show="•", parent=self)
             if not secret: return
@@ -2346,6 +1722,9 @@ class App(tk.Tk):
 
     def _backup(self, kind=None):
         key = kind or self._service_key(self.manage_choice.get())
+        if key not in SERVICES and key != "security":
+            self.status.configure(text="外部项目请使用原有备份方式。")
+            return
         self._execute({"operation": "backup", "service": key}, "备份所选服务配置到服务器的管理员专用目录。不会删除业务数据。")
 
     def _restore(self):
@@ -2357,26 +1736,6 @@ class App(tk.Tk):
         c = self.current
         self._run(lambda: self.controller.tasks(c), lambda data: self._show_tasks(data["tasks"]))
 
-    def _show_tasks(self, tasks):
-        seen = set(); self.latest_tasks = []
-        rows = []
-        for task in tasks:
-            if task["id"] in seen: continue
-            seen.add(task["id"]); self.latest_tasks.append(task)
-            names = {"deploy": "服务部署", "uninstall": "项目卸载（保留数据）", "create_admin": "创建管理员", "rename_user": "账号改名", "password": "修改密码", "ssh": "SSH 设置", "firewall": "防火墙", "updates": "安全更新", "backup": "配置备份", "restore": "配置恢复", "service": "服务管理", "account_access": "账号登录限制", "delete_user": "删除用户并保留文件", "ssh_hardening": "SSH 连接防护", "fail2ban": "防猜密码保护"}
-            names.update(prepare_key="安装并验证加密密钥", login_policy="仅密钥登录策略", retire_key="撤销原档案旧钥匙")
-            states = {"queued": "排队中", "running": "执行中", "awaiting_verification": "等待连接验证", "succeeded": "已完成", "failed": "未完成", "rolled_back": "已恢复原配置", "recovery_failed": "恢复未完成，需处理", "submission_unknown": "提交未确认"}
-            rows.append((task["id"], (task["id"], names.get(task["operation"], task["operation"]), states.get(task["state"], task["state"]), self._redactor().text(task["message"]))))
-        sync_tree(self.task_tree, rows)
-
-    def _task_detail(self):
-        selected = self.task_tree.selection()
-        if not selected: return
-        task = next(t for t in self.latest_tasks if t["id"] == selected[0])
-        text = "\n".join(event["message"] for event in task.get("events", []))
-        text += "\n\n" + task["message"]
-        if task.get("diagnostic"): text += "\n" + task["diagnostic"]
-        self._replace_text(self.task_text, self._redactor().text(text))
 
     def _task_password(self):
         if self.busy or not self.current:

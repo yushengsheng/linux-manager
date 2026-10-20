@@ -52,7 +52,8 @@ class LocalLauncherTests(unittest.TestCase):
     def test_python_discovery_accepts_an_installed_runtime_without_an_architecture_specific_path(self):
         import os
         result = subprocess.run(['/bin/sh', str(BASE / 'scripts/find-python.sh'), str(BASE)],
-                                env=os.environ | {'LINUX_MANAGER_PYTHON': sys.executable},
+                                env=os.environ | {'LINUX_MANAGER_PYTHON': sys.executable,
+                                                  'PYTHONPATH': os.pathsep.join(sys.path)},
                                 capture_output=True, text=True, timeout=12)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), sys.executable)

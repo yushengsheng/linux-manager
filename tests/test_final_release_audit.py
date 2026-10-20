@@ -70,3 +70,17 @@ class ReleaseArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             package_release(self.release, self.archive)
         self.assertEqual(self.archive.read_bytes(), b'existing-package')
+
+    def test_project_snapshots_and_runtime_metadata_are_rejected_in_delivery(self):
+        for relative in ['project-cache/fixture.json', 'external-projects.json', 'window-state.json',
+                         'ui-check.json', 'ui-error.json', 'transport-error.json', 'application.lock', 'vault.lock']:
+            with self.subTest(relative=relative):
+                file = self.release / relative
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('fixture metadata')
+                try:
+                    with self.assertRaises(ValueError):
+                        package_release(self.release, self.archive)
+                finally:
+                    file.unlink()
+                    if file.parent != self.release: file.parent.rmdir()

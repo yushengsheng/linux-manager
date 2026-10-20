@@ -17,7 +17,9 @@ from tools.build_desktop import source_hashes
 
 FORBIDDEN = {'profiles.json', 'history.json', 'current.json', 'test-connection.json', 'known_hosts',
              'askpass.sock', 'session.sock', '.git', '.env', 'client-config-backups', 'client-config-directories.json',
-             'auth.json', 'id_rsa', 'id_ed25519', 'id_ecdsa', '.DS_Store', '__pycache__'}
+             'auth.json', 'id_rsa', 'id_ed25519', 'id_ecdsa', '.DS_Store', '__pycache__',
+             'project-cache', 'external-projects.json', 'window-state.json', 'ui-check.json',
+             'ui-error.json', 'transport-error.json', 'application.lock', 'vault.lock'}
 MACHO = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe',
          b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
 

@@ -8,12 +8,43 @@ import unittest
 from unittest import mock
 
 from linux_manager.gui import App
-from linux_manager.models import Connection, ManagerError
+from linux_manager.controller import Controller
+from linux_manager.models import Connection, ManagerError, Store
 from linux_manager.project_info import information_rows, node_links, server_key, credential_alias
 from linux_manager.vault import LocalVault
 
 
 class ProjectInformationTests(unittest.TestCase):
+    def test_keychain_denial_keeps_builtin_snapshot_and_detail_available(self):
+        data = {'service': 'xui', 'installed': True, 'port': 2053, 'scheme': 'http', 'path': '/panel/'}
+        connection = Connection(host='fixture.invalid')
+        for action in ('snapshot', 'details'):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as folder:
+                vault = mock.Mock(); vault.get.side_effect = ManagerError('fixture denial')
+                controller = Controller(Store(Path(folder), vault))
+                transport = mock.Mock(); controller.transport = mock.Mock(return_value=transport)
+                transport.call.return_value = {'project_details': {'xui': dict(data)}} if action == 'snapshot' else dict(data)
+                if action == 'snapshot':
+                    information = controller.inspect(connection)['project_information']['xui']
+                else:
+                    information = controller.project_information(connection, 'xui')
+                rows = dict(information['rows'])
+                self.assertEqual(rows['后台网址'], 'http://fixture.invalid:2053/panel/')
+                self.assertIn('本机登录记录', rows)
+                self.assertNotIn('fixture denial', str(rows))
+                vault.put.assert_not_called(); vault.delete.assert_not_called()
+
+    def test_exchange_origin_without_explicit_port_uses_its_web_scheme(self):
+        from test_linux_manager import REMOTE
+        for origin, expected in [('http://fixture.invalid', 80), ('https://fixture.invalid', 443), ('http://fixture.invalid:8080', 8080)]:
+            with self.subTest(origin=origin), \
+                 mock.patch.object(REMOTE.Path, 'exists', return_value=False), \
+                 mock.patch.object(REMOTE.Path, 'is_file', lambda path: str(path) == '/etc/xiaojun-exchange/server.env'), \
+                 mock.patch.object(REMOTE.Path, 'read_text', return_value='XIAOJUN_PUBLIC_ORIGIN=' + origin), \
+                 mock.patch.object(REMOTE, 'unit_info', return_value={'LoadState': 'loaded'}), \
+                 mock.patch.object(REMOTE, 'command', return_value=SimpleNamespace(stdout='')):
+                self.assertEqual(REMOTE.connection_details({'service': 'exchange'})['port'], expected)
+
     def test_existing_panel_uses_http_and_exact_base_path_without_password_hash(self):
         conn=Connection(host='fixture.invalid',label='fixture')
         rows=dict(information_rows({'service':'xui','installed':True,'port':2054,'scheme':'http','path':'/fixture/','panel_username':'owner'},conn))

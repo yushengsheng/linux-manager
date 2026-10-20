@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -234,11 +235,38 @@ class LocalSecurityTests(unittest.TestCase):
 
     def test_remote_envelope_handles_sudo_consumed_or_unconsumed_password(self):
         agent = "print('RPC_OK',REQUEST['value'],bool(AGENT_SOURCE))"
-        packet = base64.b64encode(json.dumps({"request": {"value": "safe"}, "agent": agent}).encode()).decode()
-        for prefix in ["", "sudo-password\n"]:
-            result = subprocess.run([sys.executable, "-c", BOOTSTRAP], input=prefix + "LMREQUEST:" + packet + "\n", capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("RPC_OK safe True", result.stdout)
+        envelope = json.dumps({"request": {"value": "safe"}, "agent": agent}).encode()
+        for compressed in (False, True):
+            packet = base64.b64encode(zlib.compress(envelope) if compressed else envelope).decode()
+            for prefix in ["", "sudo-password\n"]:
+                with self.subTest(compressed=compressed, password_consumed=not prefix):
+                    result = subprocess.run([sys.executable, "-c", BOOTSTRAP], input=prefix + "LMREQUEST:" + packet + "\n", capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("RPC_OK safe True", result.stdout)
+
+    def test_compressed_envelope_preserves_request_source_and_ssh_context(self):
+        agent = "import json; print(json.dumps({'request':REQUEST,'source_length':len(AGENT_SOURCE),'context':SSH_CONTEXT}))"
+        request = {"action": "start", "params": {"username": "fixture", "password": "fictional-password", "notes": "测试\n第二行"}}
+        packet = base64.b64encode(zlib.compress(json.dumps({"request": request, "agent": agent}, ensure_ascii=False).encode())).decode()
+        result = subprocess.run([sys.executable, "-c", BOOTSTRAP, "fictional-context"], input="LMREQUEST:" + packet + "\n", capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {"request": request, "source_length": len(agent), "context": "fictional-context"})
+
+    def test_real_agent_packet_is_smaller_and_still_contains_complete_modules(self):
+        with tempfile.TemporaryDirectory() as folder:
+            connection = Connection(host="host.invalid", username="tester", password="fictional-password")
+            ssh = SSH(connection, Path(folder))
+            response = subprocess.CompletedProcess([], 0, 'LM_RESULT:{"ok":true,"data":{"safe":true}}\n', "")
+            with mock.patch.object(ssh, "trusted", return_value=True), mock.patch("linux_manager.transport.subprocess.run", return_value=response) as run:
+                request = {"action": "ping"}; ssh.call(request)
+            payload = run.call_args.kwargs["input"]
+            packet = next(line[10:] for line in payload.splitlines() if line.startswith("LMREQUEST:"))
+            compressed = base64.b64decode(packet); expanded = zlib.decompress(compressed); envelope = json.loads(expanded)
+            self.assertEqual(envelope["request"], request)
+            self.assertLess(len(compressed), len(expanded) * 0.4)
+            for marker in ("LM_EXTERNAL_PROJECTS_SOURCE", "LM_REALITY_SOURCE", "LM_REDEPLOYMENT_SOURCE", "LM_CLIPROXYAPI_SOURCE"):
+                self.assertIn(marker + " = ", envelope["agent"])
+            self.assertNotIn("#LM_BUNDLED_", envelope["agent"])
 
     def test_connection_config_keeps_authentication_values_out_of_ssh_arguments(self):
         with tempfile.TemporaryDirectory() as folder:

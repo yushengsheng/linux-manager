@@ -4,6 +4,8 @@ from __future__ import annotations
 import base64
 import contextlib
 import configparser
+import contextvars
+import copy
 import datetime
 import fcntl
 import fnmatch
@@ -11,7 +13,6 @@ import grp
 import hashlib
 import hmac
 import http.client
-import io
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,7 @@ UNITS = {
 JOB_ACTIONS = {"deploy", "uninstall", "create_admin", "rename_user", "password", "ssh", "firewall", "updates", "backup", "restore", "service", "account_access", "delete_user", "ssh_hardening", "fail2ban", "prepare_key", "login_policy", "retire_key"}
 TASK = None
 SECRETS = set()
+_INSPECTION_QUERIES = contextvars.ContextVar("inspection_queries", default=None)
 APT_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
 UPDATE_CONFIG = "/etc/apt/apt.conf.d/90-linux-manager-updates"
 CERTIFICATE_CONFIG = "/etc/linux-server-manager/letsencrypt"
@@ -163,27 +165,54 @@ def host(value):
     return value
 
 
+@contextlib.contextmanager
+def inspection_queries():
+    """Reuse successful reads only within one synchronous inspection."""
+    if _INSPECTION_QUERIES.get() is not None:
+        yield
+        return
+    token = _INSPECTION_QUERIES.set({})
+    try:
+        yield
+    finally:
+        _INSPECTION_QUERIES.reset(token)
+
+
+def _inspection_read(key, reader):
+    cache = _INSPECTION_QUERIES.get()
+    if cache is not None and key in cache:
+        return copy.deepcopy(cache[key])
+    value, successful = reader()
+    if cache is not None and successful:
+        cache[key] = copy.deepcopy(value)
+    return value
+
+
 def unit_info(unit):
-    data = {}
-    result = command(["systemctl", "show", unit, "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,Description,FragmentPath,DropInPaths"], check=False)
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            data[key] = value
-    return data
+    def read():
+        data = {}
+        result = command(["systemctl", "show", unit, "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,Description,FragmentPath,DropInPaths"], check=False)
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                data[key] = value
+        return data, result.returncode == 0
+    return _inspection_read(("unit", unit), read)
 
 
 def listeners():
-    result = command(["ss", "-lntupH"], check=False)
-    rows = []
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) < 6:
-            continue
-        address, _, number = fields[4].rpartition(":")
-        if number.isdigit():
-            rows.append({"protocol": fields[0], "port": int(number), "local_only": address.strip("[]") in {"127.0.0.1", "::1"} or address.startswith("127."), "processes": sorted(set(re.findall(r'\("([^"\n]+)"', line)))})
-    return rows
+    def read():
+        result = command(["ss", "-lntupH"], check=False)
+        rows = []
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            address, _, number = fields[4].rpartition(":")
+            if number.isdigit():
+                rows.append({"protocol": fields[0], "port": int(number), "local_only": address.strip("[]") in {"127.0.0.1", "::1"} or address.startswith("127."), "processes": sorted(set(re.findall(r'\("([^"\n]+)"', line)))})
+        return rows, result.returncode == 0
+    return _inspection_read(("listeners",), read)
 
 
 def ensure_port_available(number, protocol="tcp"):
@@ -209,16 +238,18 @@ def account_snapshot():
 
 
 def ssh_configuration(context=None):
-    result = command(["/usr/sbin/sshd", "-T"] + (["-C", context] if context else []), check=False)
-    fields = {"port", "permitrootlogin", "passwordauthentication", "kbdinteractiveauthentication", "pubkeyauthentication", "authenticationmethods", "allowusers", "denyusers", "allowgroups", "denygroups", "authorizedkeysfile", "maxauthtries", "x11forwarding", "allowagentforwarding", "allowtcpforwarding", "logingracetime", "clientaliveinterval", "clientalivecountmax", "permitemptypasswords", "loglevel"}
-    values = {}
-    for line in result.stdout.splitlines():
-        key, _, value = line.partition(" ")
-        if key in fields:
-            values.setdefault(key, []).append(value)
-    values["valid"] = command(["/usr/sbin/sshd", "-t"], check=False).returncode == 0
-    values["query_valid"] = result.returncode == 0
-    return values
+    def read():
+        result = command(["/usr/sbin/sshd", "-T"] + (["-C", context] if context else []), check=False)
+        fields = {"port", "permitrootlogin", "passwordauthentication", "kbdinteractiveauthentication", "pubkeyauthentication", "authenticationmethods", "allowusers", "denyusers", "allowgroups", "denygroups", "authorizedkeysfile", "maxauthtries", "x11forwarding", "allowagentforwarding", "allowtcpforwarding", "logingracetime", "clientaliveinterval", "clientalivecountmax", "permitemptypasswords", "loglevel"}
+        values = {}
+        for line in result.stdout.splitlines():
+            key, _, value = line.partition(" ")
+            if key in fields:
+                values.setdefault(key, []).append(value)
+        values["valid"] = command(["/usr/sbin/sshd", "-t"], check=False).returncode == 0
+        values["query_valid"] = result.returncode == 0
+        return values, values["valid"] and values["query_valid"]
+    return _inspection_read(("ssh", context), read)
 
 
 def account_details(request):
@@ -298,6 +329,7 @@ def restore_update_timers(timers):
     require(all(current[unit].get("UnitFileState") == timers[unit].get("UnitFileState") and (current[unit].get("ActiveState") == "active") == (timers[unit].get("ActiveState") == "active") for unit in APT_TIMERS), "更新定时器原状态恢复未通过，请查看任务记录。")
 
 
+@inspection_queries()
 def snapshot(include_projects=False, address=""):
     release = platform.freedesktop_os_release()
     disk = shutil.disk_usage("/")
@@ -1703,6 +1735,9 @@ def deploy(params):
 
 def manage_service(params):
     kind = params.get("service"); operation = params.get("action")
+    if isinstance(kind, str) and kind.startswith("external:"):
+        step("正在核对并管理所选外部项目…", 40)
+        return external_project_call("manage", params)
     require(kind in UNITS and operation in {"start", "stop", "restart", "enable", "disable"}, "服务管理操作无效。")
     selected = [u for u in UNITS[kind] if unit_info(u).get("LoadState") == "loaded"]
     require(selected, "服务尚未安装。")
@@ -1836,7 +1871,7 @@ def connection_details(params):
             if origin:
                 parsed = urllib.parse.urlsplit(origin)
                 if parsed.scheme in {"http","https"} and parsed.hostname:
-                    data.update(host=parsed.hostname,port=parsed.port or 443,scheme=parsed.scheme,path="/")
+                    data.update(host=parsed.hostname,port=parsed.port or (443 if parsed.scheme == "https" else 80),scheme=parsed.scheme,path="/")
         config = command(["systemctl","show","xiaojun-exchange-web.service","--property=ExecStart","--value"],check=False).stdout
         match = re.search(r"--port\s+(\d+)",config)
         if match:data["backend_port"]=int(match.group(1))
@@ -1901,6 +1936,8 @@ def connection_details(params):
 def dispatch(request):
     require(os.geteuid() == 0, "此功能需要服务器管理员权限。")
     operation = request.get("action")
+    if operation in {"external_projects", "external_details", "external_logs", "external_directory"}:
+        return external_project_call(operation, request)
     if operation == "ping":
         return {"root_access": True, "time": now()}
     if operation == "verify_password":
@@ -2040,6 +2077,53 @@ if globals().get("LM_CLIPROXY_OAUTH_SOURCE"):
     exec(compile(LM_CLIPROXY_OAUTH_SOURCE, "<linux-manager-oauth>", "exec"), globals())
 elif "__file__" in globals() and Path(__file__).with_name("cliproxy_oauth.py").is_file():
     exec(compile(Path(__file__).with_name("cliproxy_oauth.py").read_text(), "<linux-manager-oauth>", "exec"), globals())
+
+#LM_BUNDLED_EXTERNAL_PROJECTS#
+_external_projects = {"__name__": "linux_manager_external_projects"}
+if globals().get("LM_EXTERNAL_PROJECTS_SOURCE"):
+    exec(compile(LM_EXTERNAL_PROJECTS_SOURCE, "<linux-manager-external-projects>", "exec"), _external_projects)
+elif "__file__" in globals() and Path(__file__).with_name("external_projects.py").is_file():
+    exec(compile(Path(__file__).with_name("external_projects.py").read_text(), "<linux-manager-external-projects>", "exec"), _external_projects)
+
+
+def external_project_call(action, request):
+    excluded = {unit for units in UNITS.values() for unit in units} | set(globals().get("CP_UNITS", ()))
+    paths = {path for layout in globals().get("UNINSTALL_LAYOUTS", {}).values() for path in layout.get("programs", [])}
+    manager = _external_projects["ExternalProjects"](command, excluded, paths)
+    try:
+        if action == "external_projects":
+            result = manager.discover()
+            directories = request.get("directories", [])
+            require(isinstance(directories, list) and len(directories) <= 100, "登记目录数量或格式无效。")
+            for directory in directories:
+                try:
+                    project = manager.directory(directory); project["registered_local"] = True
+                    result["projects"] = [p for p in result["projects"] if p["id"] != project["id"]]
+                    result["projects"].append(project)
+                except _external_projects["ExternalProjectError"]:
+                    if "部分本机登记目录不存在或无法读取。" not in result["warnings"]:
+                        result["warnings"].append("部分本机登记目录不存在或无法读取。")
+            if request.get("include_builtin"):
+                result["builtin_details"] = {}
+                with inspection_queries():
+                    for service in UNITS:
+                        try:
+                            data = connection_details({"service": service, "host": request.get("host", "")})
+                            result["builtin_details"][service] = data
+                        except Exception:
+                            result["warnings"].append("部分内置项目详情未能完整读取；请在原页面核对。")
+            return result
+        if action == "external_details":
+            return manager.details(request.get("identifier", ""), request.get("directory"))
+        if action == "external_directory":
+            return manager.directory(request.get("directory"))
+        if action == "external_logs":
+            return manager.logs(request.get("identifier", ""))
+        if action == "manage":
+            return manager.manage(request.get("service", ""), request.get("action"), request.get("external_fingerprint"))
+    except _external_projects["ExternalProjectError"] as error:
+        raise OperationError(str(error)) from None
+    raise OperationError("外部项目操作无效。")
 
 if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "cp-oauth":
     cp_oauth_worker(sys.argv[2])

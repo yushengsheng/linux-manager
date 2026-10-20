@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 
 from .models import Connection, ManagerError, Redactor, atomic_private
 
@@ -63,7 +64,7 @@ def interruptible_ssh(args, *, cancel_event, timeout, **kwargs):
         stdout, stderr = output[0]
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
-BOOTSTRAP = "import sys,json,base64; lines=sys.stdin.read().splitlines(); packet=next(x[10:] for x in lines if x.startswith('LMREQUEST:')); e=json.loads(base64.b64decode(packet)); scope={'__name__':'linux_manager_remote','REQUEST':e['request'],'AGENT_SOURCE':e['agent'],'SSH_CONTEXT':sys.argv[1] if len(sys.argv)>1 else ''}; exec(compile(e['agent'],'<linux-manager-agent>','exec'),scope)"
+BOOTSTRAP = "import sys,json,base64,zlib; lines=sys.stdin.read().splitlines(); packet=next(x[10:] for x in lines if x.startswith('LMREQUEST:')); raw=base64.b64decode(packet); e=json.loads(raw if raw.lstrip().startswith(b'{') else zlib.decompress(raw)); scope={'__name__':'linux_manager_remote','REQUEST':e['request'],'AGENT_SOURCE':e['agent'],'SSH_CONTEXT':sys.argv[1] if len(sys.argv)>1 else ''}; exec(compile(e['agent'],'<linux-manager-agent>','exec'),scope)"
 
 
 class Askpass:
@@ -210,9 +211,10 @@ class SSH:
         source = source.replace("#LM_BUNDLED_CLIPROXYAPI#", "LM_CLIPROXYAPI_SOURCE = " + repr(Path(__file__).with_name("cliproxyapi.py").read_text()))
         source = source.replace("#LM_BUNDLED_OAUTH_CONTRACT#", "LM_OAUTH_CONTRACT_SOURCE = " + repr(Path(__file__).with_name("oauth_contract.py").read_text()))
         source = source.replace("#LM_BUNDLED_CLIPROXY_OAUTH#", "LM_CLIPROXY_OAUTH_SOURCE = " + repr(Path(__file__).with_name("cliproxy_oauth.py").read_text()))
+        source = source.replace("#LM_BUNDLED_EXTERNAL_PROJECTS#", "LM_EXTERNAL_PROJECTS_SOURCE = " + repr(Path(__file__).with_name("external_projects.py").read_text()))
         envelope = json.dumps({"agent": source, "request": request}, ensure_ascii=False).encode()
         # Passwords and the complete request are never command-line arguments.
-        payload = (self.connection.sudo_password or self.connection.password) + "\nLMREQUEST:" + base64.b64encode(envelope).decode() + "\n"
+        payload = (self.connection.sudo_password or self.connection.password) + "\nLMREQUEST:" + base64.b64encode(zlib.compress(envelope)).decode() + "\n"
         command = "if [ \"$(id -u)\" = 0 ]; then python3 -c " + shlex.quote(BOOTSTRAP) + ' "$SSH_CONNECTION"; else sudo -S -p \'\' python3 -c ' + shlex.quote(BOOTSTRAP) + ' "$SSH_CONNECTION"; fi'
         secret = self.connection.password if self.connection.auth == "password" else self.connection.key_passphrase
         with tempfile.TemporaryDirectory(prefix="lm-", dir=self.directory) as temporary:
