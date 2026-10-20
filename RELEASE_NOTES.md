@@ -17,6 +17,8 @@
 
 发版前全部 41 个模块、664 项本地回归：662 项通过、2 项可选环境跳过、0 失败、0 错误；8 个页面与滚动区域检查通过。跳过项为二维码可选解码器和本机 Nginx 实测，详见[发版前检查](发版前检查.md)。本次发布不操作用户真实服务器或导出凭据。
 
+[GitHub 完整回归与双架构代理实测](https://github.com/yushengsheng/linux-manager/actions/runs/39400540986)、[真实 Nginx／证书兼容实测](https://github.com/yushengsheng/linux-manager/actions/runs/39400540961) 全部通过。本机跳过的二维码解码和 Nginx 实测已在 GitHub 独立 Linux 环境补测通过。
+
 # v0.3.12 发布说明
 
 发布日期：2026-10-14。
