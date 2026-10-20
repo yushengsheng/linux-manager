@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import gc
 import importlib.util
 import json
@@ -74,8 +75,11 @@ class LoopbackTests(unittest.TestCase):
         number = self.receiver.port; self.receiver.close(); self.receiver.close()
         for family, address in [(socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')]:
             with socket.socket(family) as probe:
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                probe.bind((address, number))
+                # Linux may retain an accepted connection in TIME_WAIT after
+                # its listener closes. Check that nothing is listening; do not
+                # require the kernel to permit immediate rebinding that socket.
+                probe.settimeout(1)
+                self.assertEqual(probe.connect_ex((address, number)), errno.ECONNREFUSED)
         self.assertFalse(any(thread.is_alive() for thread in self.receiver.threads))
 
     def test_conflict_does_not_close_or_take_over_existing_listener(self):
