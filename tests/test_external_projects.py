@@ -22,7 +22,7 @@ class ExternalDiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.command = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=""))
         self.manager = ExternalProjects(self.command, {"cli-proxy-api.service", "nginx.service"})
-        for method in ("_pm2", "_directories", "_proxy_routes"):
+        for method in ("_pm2", "_directories", "_proxy_routes", "_application_homes"):
             patch = mock.patch.object(self.manager, method, return_value=[])
             patch.start(); self.addCleanup(patch.stop)
         patch = mock.patch.object(self.manager, "_listeners", return_value=[])
@@ -170,7 +170,8 @@ class ExternalDirectoryAndPM2Tests(unittest.TestCase):
                 self.assertEqual(path, install / "pyproject.toml")
                 return original(path, *args, **kwargs)
             with mock.patch.object(manager, "_application_homes", return_value=[owner]), \
-                 mock.patch.object(manager, "_directories", return_value=[]), mock.patch.object(Path, "read_text", read):
+                 mock.patch.object(manager, "_directories", return_value=[]), \
+                 mock.patch.object(manager, "_proxy_routes", return_value=[]), mock.patch.object(Path, "read_text", read):
                 projects = manager._hermes([])
                 self.assertEqual(len(projects), 1)
                 value = projects[0]
@@ -205,6 +206,7 @@ class ExternalDirectoryAndPM2Tests(unittest.TestCase):
             with mock.patch.object(manager, "_application_homes", return_value=[owner]), \
                  mock.patch.object(manager, "_user_systemctl", return_value=text) as control, \
                  mock.patch("linux_manager.external_projects.pwd.getpwuid", return_value=owner), \
+                 mock.patch.object(manager, "_proxy_routes", return_value=[]), \
                  mock.patch.object(manager, "_listeners", return_value=[]):
                 projects = manager._user_systemd()
                 self.assertEqual(len(projects), 1)
