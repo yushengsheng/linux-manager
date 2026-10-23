@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -30,9 +32,45 @@ def check(condition, message):
     print('PASS: ' + message, flush=True)
 
 
-def main():
+def require_disposable_runner():
     if os.environ.get('GITHUB_ACTIONS') != 'true' or os.geteuid() != 0 or not Path('/run/systemd/system').is_dir():
         raise SystemExit('Requires a disposable GitHub Actions runner with root and systemd')
+
+
+@contextlib.contextmanager
+def reality_test_origin(remote, origin_port):
+    """Allow only the synthetic HTTP origin while testing; restore exact bytes."""
+    require_disposable_runner()
+    if type(origin_port) is not int or not 1 <= origin_port <= 65535:
+        raise ValueError('Invalid isolated HTTP origin port')
+    path = Path(remote.REALITY_CONFIG)
+    original = path.read_bytes()
+    mode = stat.S_IMODE(path.stat().st_mode)
+    config = json.loads(original)
+    direct = [item for item in config.get('outbounds', [])
+              if item.get('tag') == 'direct' and item.get('protocol') == 'freedom']
+    if len(direct) != 1:
+        raise RuntimeError('Expected one test-node direct outbound')
+    settings = direct[0].setdefault('settings', {})
+    # New Xray versions block private targets by default. This exception belongs
+    # only to the disposable CI fixture, never to generated production configs.
+    rule = {'action':'allow', 'network':'tcp', 'ip':['127.0.0.1/32'], 'port':str(origin_port)}
+    settings['finalRules'] = [rule, *settings.get('finalRules', [])]
+    with tempfile.TemporaryDirectory(prefix='.ci-origin-', dir=path.parent) as folder:
+        candidate = Path(folder) / 'config.json'
+        remote.private_write(candidate, json.dumps(config), mode)
+        remote.command([remote.REALITY_BINARY, 'run', '-test', '-config', str(candidate)])
+        try:
+            remote.private_write(path, candidate.read_bytes(), mode)
+            remote.command(['systemctl', 'restart', remote.REALITY_UNIT])
+            yield
+        finally:
+            remote.private_write(path, original, mode)
+            remote.command(['systemctl', 'restart', remote.REALITY_UNIT])
+
+
+def main():
+    require_disposable_runner()
     if any(Path(name).exists() for name in ['/var/lib/linux-server-manager','/etc/linux-manager-xray','/usr/local/lib/linux-manager-xray','/etc/sing-box/config.json','/usr/local/bin/sing-box']):
         raise SystemExit('Existing installation detected; refusing to modify it')
     artifacts=Path(os.environ['RUNNER_TEMP'])/'proxy-acceptance';artifacts.mkdir(mode=0o700)
@@ -80,6 +118,10 @@ def main():
     origin=http.server.ThreadingHTTPServer(('127.0.0.1',0),Origin)
     threading.Thread(target=origin.serve_forever,daemon=True).start()
     def traffic(service):
+        fixture = reality_test_origin(remote, origin.server_port) if service == 'reality' else contextlib.nullcontext()
+        with fixture:
+            probe_traffic(service)
+    def probe_traffic(service):
         data=details(service);link=qr_check(data);parsed=urllib.parse.urlsplit(link);query=urllib.parse.parse_qs(parsed.query)
         if service=='reality':
             config={'log':{'loglevel':'warning'},'inbounds':[{'listen':'127.0.0.1','port':10880,'protocol':'socks','settings':{'auth':'noauth'}}],'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':parsed.hostname,'port':parsed.port,'users':[{'id':parsed.username,'encryption':'none','flow':query['flow'][0]}]}]},'streamSettings':{'network':'raw','security':'reality','realitySettings':{'serverName':query['sni'][0],'fingerprint':query['fp'][0],'password':query['pbk'][0],'shortId':query['sid'][0]}}}]}
