@@ -15,6 +15,10 @@ sys.path.insert(0, str(BASE))
 from linux_manager import APP_NAME, VERSION
 from tools.build_desktop import source_hashes
 
+RELEASE_ROOT = BASE / 'dist' / 'release'
+DEFAULT_RELEASE_DIR = RELEASE_ROOT / ('新版v' + VERSION + '-Mac通用')
+DEFAULT_ARCHIVE = RELEASE_ROOT / ('linux-server-manager-macOS-universal2-v' + VERSION + '.zip')
+
 FORBIDDEN = {'profiles.json', 'history.json', 'current.json', 'test-connection.json', 'known_hosts',
              'askpass.sock', 'session.sock', '.git', '.env', 'client-config-backups', 'client-config-directories.json',
              'auth.json', 'id_rsa', 'id_ed25519', 'id_ecdsa', '.DS_Store', '__pycache__',
@@ -114,8 +118,8 @@ def audit(release, archive, checksum):
 
 def main():
     parser = argparse.ArgumentParser(description='只读检查本地 Mac 通用安装包，不读取连接档案或操作服务器')
-    parser.add_argument('--release-dir', type=Path, default=BASE / ('新版v' + VERSION + '-Mac通用'))
-    parser.add_argument('--archive', type=Path, default=BASE / ('linux-server-manager-macOS-universal2-v' + VERSION + '.zip'))
+    parser.add_argument('--release-dir', type=Path, default=DEFAULT_RELEASE_DIR)
+    parser.add_argument('--archive', type=Path, default=DEFAULT_ARCHIVE)
     parser.add_argument('--checksum', type=Path)
     args = parser.parse_args()
     checksum = args.checksum or args.archive.with_suffix('.sha256')

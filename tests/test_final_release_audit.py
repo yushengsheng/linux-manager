@@ -4,8 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
-from tools.final_release_audit import audit_archive
+from tools import package_desktop
+from tools.final_release_audit import DEFAULT_ARCHIVE, DEFAULT_RELEASE_DIR, audit_archive
 from tools.package_desktop import package_release
 
 
@@ -70,6 +72,24 @@ class ReleaseArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             package_release(self.release, self.archive)
         self.assertEqual(self.archive.read_bytes(), b'existing-package')
+
+    def test_missing_delivery_does_not_create_an_output_directory_or_archive(self):
+        output = self.release.parent / 'not-created' / 'release.zip'
+        with self.assertRaisesRegex(ValueError, '未找到正式交付目录'):
+            package_release(self.release / 'missing', output)
+        self.assertFalse(output.parent.exists())
+
+    def test_default_packaging_keeps_artifacts_in_the_ignored_release_directory(self):
+        with mock.patch.object(package_desktop.sys, 'argv', ['package_desktop.py']), mock.patch.object(package_desktop, 'package_release', return_value='fixture-digest') as package, mock.patch('builtins.print'):
+            package_desktop.main()
+        package.assert_called_once_with(DEFAULT_RELEASE_DIR, DEFAULT_ARCHIVE)
+        self.assertEqual(DEFAULT_ARCHIVE.parent, package_desktop.BASE / 'dist/release')
+        self.assertEqual(DEFAULT_RELEASE_DIR.parent, DEFAULT_ARCHIVE.parent)
+
+    def test_explicit_delivery_and_archive_paths_remain_supported(self):
+        with mock.patch.object(package_desktop.sys, 'argv', ['package_desktop.py', '--release-dir', str(self.release), '--archive', str(self.archive)]), mock.patch.object(package_desktop, 'package_release', return_value='fixture-digest') as package, mock.patch('builtins.print'):
+            package_desktop.main()
+        package.assert_called_once_with(self.release, self.archive)
 
     def test_project_snapshots_and_runtime_metadata_are_rejected_in_delivery(self):
         for relative in ['project-cache/fixture.json', 'external-projects.json', 'window-state.json',

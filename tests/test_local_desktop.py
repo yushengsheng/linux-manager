@@ -81,6 +81,15 @@ class LocalLauncherTests(unittest.TestCase):
             self.assertFalse((root / "linux服务器管理.app").exists())
             self.assertNotIn("Terminal", text)
             self.assertIn("/usr/bin/screen -dmS", text)
+            # Updating source must affect the same fixed entry without recompiling it.
+            marker.unlink()
+            source.write_text("from pathlib import Path\nimport sys\nPath(" + repr(str(marker)) + ").write_text('updated ' + ' '.join(sys.argv[1:])) if '--self-check' not in sys.argv else None\n")
+            subprocess.run(["/usr/bin/open", "-n", str(launcher)], check=True, capture_output=True, timeout=10)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and (not marker.is_file() or not marker.read_text()):
+                time.sleep(0.1)
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(), "updated --desktop-data")
 
     def test_missing_source_has_explicit_native_diagnostic(self):
         with tempfile.TemporaryDirectory(prefix="lm-local-missing-", dir="/private/tmp") as folder:

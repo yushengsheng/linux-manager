@@ -54,10 +54,12 @@ result={u:subprocess.check_output(['systemctl','show',u,'-p','MainPID','-p','Inv
 
 
 def main():
+    authorized_label = os.environ.get('LM_AUTHORIZED_TEST_PROFILE', '').strip()
+    check(bool(authorized_label), 'authorized test profile required')
     EVIDENCE.mkdir(mode=0o700, exist_ok=True)
     store = Store(Path.home()/'Library/Application Support/linux服务器管理')
     profiles = store.profiles()
-    check(len(profiles)==1 and profiles[0].label=='wyl' and not store.last_warning, 'exact configured test profile selected')
+    check(len(profiles)==1 and profiles[0].label==authorized_label and not store.last_warning, 'exact configured test profile selected')
     c = profiles[0]; controller = Controller(store); ssh = controller.transport(c, fresh=True)
     report = controller.inspect(c)
     check(report['supported'] and report['architecture']=='x86_64', 'supported disposable Linux server')

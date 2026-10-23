@@ -24,6 +24,15 @@ current.json
 test-connection.json
 window-state.json
 ui-check.json
+ui-error.json
+transport-error.json
+project-cache/
+external-projects.json
+client-config-backups/
+client-config-directories.json
+application.lock
+vault.lock
+*.sock
 *.p12
 *.pfx
 id_rsa*

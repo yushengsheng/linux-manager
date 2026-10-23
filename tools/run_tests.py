@@ -13,13 +13,7 @@ import unittest
 base = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(base))
 sys.path.insert(0, str(base / 'tests'))
-values = [str(base)]
-for path in [base / "scripts/.rename_account_gui_state.json", Path("/private/tmp/linux-manager-development/current.json")]:
-    try:
-        data = json.loads(path.read_text())
-        values.extend(v for v in data.values() if isinstance(v, str) and v)
-    except (OSError, ValueError, AttributeError):
-        pass
+values = [str(base), str(Path.home())]
 
 
 def redact(output):
