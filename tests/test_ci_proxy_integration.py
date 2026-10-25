@@ -61,11 +61,42 @@ class IsolatedRealityOriginTests(unittest.TestCase):
         self.remote.command.assert_called_once()
 
     def test_startup_failure_restores_original_before_retrying_service(self):
-        self.remote.command.side_effect = [None, RuntimeError('synthetic startup failure'), None]
+        status = types.SimpleNamespace(returncode=0, stdout='exit-code\n')
+        self.remote.command.side_effect = [None, RuntimeError('synthetic startup failure'), status, None]
         with self.assertRaisesRegex(RuntimeError, 'synthetic startup failure'):
             with ci.reality_test_origin(self.remote, 34567):
                 self.fail('failed service was used')
         self.assert_restored()
+
+    def test_fixture_rate_limit_resets_only_the_disposable_unit_and_retries_once(self):
+        status = types.SimpleNamespace(returncode=0, stdout='start-limit-hit\n')
+        self.remote.command.side_effect = [RuntimeError('synthetic rate limit'), status, None, None]
+        with mock.patch('builtins.print'):
+            ci.restart_fixture_unit(self.remote)
+        self.assertEqual(self.remote.command.call_args_list, [
+            mock.call(['systemctl', 'restart', self.remote.REALITY_UNIT]),
+            mock.call(['systemctl', 'show', '--property=Result', '--value', self.remote.REALITY_UNIT], check=False),
+            mock.call(['systemctl', 'reset-failed', self.remote.REALITY_UNIT]),
+            mock.call(['systemctl', 'restart', self.remote.REALITY_UNIT])])
+
+    def test_real_startup_failure_is_not_reset_or_hidden(self):
+        for status in [types.SimpleNamespace(returncode=0, stdout='exit-code\n'),
+                       types.SimpleNamespace(returncode=1, stdout='')]:
+            with self.subTest(status=status):
+                self.remote.command.reset_mock()
+                self.remote.command.side_effect = [RuntimeError('synthetic real failure'), status]
+                with self.assertRaisesRegex(RuntimeError, 'synthetic real failure'):
+                    ci.restart_fixture_unit(self.remote)
+                self.assertEqual(self.remote.command.call_count, 2)
+                self.assertFalse(any('reset-failed' in call.args[0] for call in self.remote.command.call_args_list))
+
+    def test_rate_limit_retry_failure_is_not_retried_again(self):
+        status = types.SimpleNamespace(returncode=0, stdout='start-limit-hit\n')
+        self.remote.command.side_effect = [RuntimeError('synthetic rate limit'), status, None,
+                                           RuntimeError('synthetic retry failure')]
+        with mock.patch('builtins.print'), self.assertRaisesRegex(RuntimeError, 'synthetic retry failure'):
+            ci.restart_fixture_unit(self.remote)
+        self.assertEqual(self.remote.command.call_count, 4)
 
     def test_missing_runner_guard_stops_before_reading_or_writing_config(self):
         self.guard.side_effect = SystemExit('not a disposable runner')

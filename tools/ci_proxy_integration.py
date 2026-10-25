@@ -62,11 +62,25 @@ def reality_test_origin(remote, origin_port):
         remote.command([remote.REALITY_BINARY, 'run', '-test', '-config', str(candidate)])
         try:
             remote.private_write(path, candidate.read_bytes(), mode)
-            remote.command(['systemctl', 'restart', remote.REALITY_UNIT])
+            restart_fixture_unit(remote)
             yield
         finally:
             remote.private_write(path, original, mode)
-            remote.command(['systemctl', 'restart', remote.REALITY_UNIT])
+            restart_fixture_unit(remote)
+
+
+def restart_fixture_unit(remote):
+    """Recover only a restart-rate limit caused by the disposable CI fixture."""
+    require_disposable_runner()
+    try:
+        remote.command(['systemctl', 'restart', remote.REALITY_UNIT])
+    except Exception:
+        status = remote.command(['systemctl', 'show', '--property=Result', '--value', remote.REALITY_UNIT], check=False)
+        if getattr(status, 'returncode', 1) != 0 or getattr(status, 'stdout', '').strip() != 'start-limit-hit':
+            raise
+        print('CI fixture reached the systemd restart-rate limit; resetting only this disposable unit.', flush=True)
+        remote.command(['systemctl', 'reset-failed', remote.REALITY_UNIT])
+        remote.command(['systemctl', 'restart', remote.REALITY_UNIT])
 
 
 def main():

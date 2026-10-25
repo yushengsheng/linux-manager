@@ -28,6 +28,8 @@ jobs:
           /tmp/proxy-tests/bin/pip install -r requirements.txt pillow==11.3.0 zxing-cpp==2.3.0
           sudo mkdir -p /private/tmp
           sudo chmod 1777 /private/tmp
+      - name: Prepare Codex CLI for gateway integration regressions
+        run: /tmp/proxy-tests/bin/python tools/ci_new_api_setup.py --install
       - name: Run all regressions including native UI and QR decoding
         run: xvfb-run -a /tmp/proxy-tests/bin/python tools/run_tests.py
 

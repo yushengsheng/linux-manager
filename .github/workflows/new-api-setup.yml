@@ -2,7 +2,7 @@ name: New API three-platform setup
 
 on:
   push:
-    branches: ['codex/new-api-setup-*']
+    branches: [main, 'codex/new-api-setup-*']
     paths:
       - 'tools/new_api_setup.py'
       - 'tools/build_new_api_guide.py'
@@ -14,6 +14,7 @@ on:
       - 'tests/test_new_api_setup.py'
       - 'tests/test_new_api_mirror.py'
       - 'scripts/new_api_auto_update.py'
+      - 'scripts/install_new_api_client_mirror.py'
       - 'tests/test_new_api_auto_update.py'
       - '.github/workflows/new-api-setup.yml'
   workflow_dispatch:
