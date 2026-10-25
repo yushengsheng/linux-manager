@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -86,7 +87,17 @@ def restricted_windows_child(bootstrap=False):
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline(arguments))
         check(advapi.CreateProcessAsUserW(limited, None, command, None, None, True, 0, None, str(ROOT), ctypes.byref(startup), ctypes.byref(process)))
         try:
-            waited = kernel.WaitForSingleObject(process.hProcess, 15 * 60 * 1000)
+            deadline = time.monotonic() + 15 * 60
+            offset = 0
+            while True:
+                waited = kernel.WaitForSingleObject(process.hProcess, 30000)
+                if waited != 258 or time.monotonic() >= deadline:
+                    break
+                # Only synthetic fixture diagnostics enter this log.
+                progress = log.read_text(encoding='utf-8', errors='replace')
+                if len(progress) > offset:
+                    print(progress[offset:], flush=True)
+                    offset = len(progress)
             if waited != 0:
                 kernel.TerminateProcess(process.hProcess, 1)
                 raise RuntimeError("restricted_test_timeout")

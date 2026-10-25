@@ -18,6 +18,7 @@ def run():
     from tools.build_new_api_mirror import build
     mirror = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-mirror'
     build(mirror, current_platform=True)
+    print(json.dumps({'bootstrap_stage': 'mirror_verified'}), flush=True)
     gateway = Gateway(Path(tempfile.mkdtemp(prefix='mirror-tls-')), mirror=mirror)
     try:
         return run_client(mirror, gateway)
@@ -47,10 +48,12 @@ def run_client(mirror, gateway):
     if os.name == "nt":
         shell = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
         env["PATH"] = os.pathsep.join([str(Path(shell).parent), str(Path(os.environ["SystemRoot"]) / "System32"), os.environ["SystemRoot"]])
-        trusted = subprocess.run(['certutil', '-user', '-addstore', 'Root', str(gateway.cert)], capture_output=True)
+        print(json.dumps({'bootstrap_stage': 'trust_fixture_certificate'}), flush=True)
+        trusted = subprocess.run(['certutil', '-user', '-f', '-addstore', 'Root', str(gateway.cert)], capture_output=True, timeout=45)
         if trusted.returncode:
             raise RuntimeError('fixture_certificate_trust_failed')
         trust_added = True
+        print(json.dumps({'bootstrap_stage': 'fixture_certificate_trusted'}), flush=True)
         script = downloaded.decode('utf-8')
         source = base64.b64encode(script.encode("utf-8")).decode("ascii")
         invoke = "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + source + "')))) -PrepareOnly"
@@ -63,12 +66,13 @@ def run_client(mirror, gateway):
         script.write_bytes(downloaded)
         args = ["/bin/sh", str(script), "--prepare-only"]
     try:
+        print(json.dumps({'bootstrap_stage': 'run_server_only_client'}), flush=True)
         result = subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=420)
     finally:
         if trust_added:
             import hashlib as _hashlib
             der = ssl.PEM_cert_to_DER_cert(gateway.cert.read_text())
-            subprocess.run(['certutil', '-user', '-delstore', 'Root', _hashlib.sha1(der).hexdigest()], capture_output=True)
+            subprocess.run(['certutil', '-user', '-delstore', 'Root', _hashlib.sha1(der).hexdigest()], capture_output=True, timeout=30)
     # No keys or user data enter this process; still avoid dumping runtime paths.
     if result.returncode:
         error = result.stderr.decode("utf-8", "replace")
