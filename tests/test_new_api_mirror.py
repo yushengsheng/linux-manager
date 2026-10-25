@@ -36,7 +36,7 @@ class NewApiMirrorTests(unittest.TestCase):
     def test_cli_download_stays_on_mirror_and_rejects_bad_digest(self):
         opener = mock.Mock()
         opener.open.return_value = io.BytesIO(b'fixture-corrupt-download')
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(setup.os.environ, {'NEWAPI_DOWNLOAD_BASE': 'https://mirror.example/client-setup'}), mock.patch.object(setup, 'discover_codex', side_effect=setup.SetupError('fixture_missing_cli')), mock.patch.object(setup.urllib.request, 'build_opener', return_value=opener):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(setup.os.environ, {'NEWAPI_DOWNLOAD_BASE': 'https://mirror.example/client-setup'}), mock.patch.object(setup, 'discover_codex', side_effect=setup.SetupError('fixture_missing_cli')), mock.patch.object(setup.urllib.request, 'build_opener', return_value=opener), mock.patch('sys.stdout', io.StringIO()):
             with self.assertRaisesRegex(setup.SetupError, '校验失败'):
                 setup.prepare_codex(Path(temporary))
             self.assertTrue(opener.open.call_args.args[0].startswith('https://mirror.example/client-setup/codex/0.164.0/'))
