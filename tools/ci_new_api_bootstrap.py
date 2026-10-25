@@ -1,5 +1,6 @@
 """Exercise the public bootstrap without relying on installed Python/Codex on PATH."""
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -20,8 +21,10 @@ def run():
         shell = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
         env["PATH"] = os.pathsep.join([str(Path(shell).parent), str(Path(os.environ["SystemRoot"]) / "System32"), os.environ["SystemRoot"]])
         script = (ROOT / "tools/new_api_bootstrap.ps1").read_text(encoding="utf-8")
-        stdin = ("& {\n" + script + "\n} -PrepareOnly\n").encode("utf-8")
-        args = [shell, "-NoProfile", "-NonInteractive", "-Command", "-"]
+        source = base64.b64encode(script.encode("utf-8")).decode("ascii")
+        invoke = "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + source + "')))) -PrepareOnly"
+        stdin = None
+        args = [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.b64encode(invoke.encode("utf-16-le")).decode("ascii")]
     else:
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         stdin = None
