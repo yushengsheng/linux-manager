@@ -1,0 +1,127 @@
+{
+  "uv_version": "0.13.5",
+  "python_version": "3.13.17",
+  "codex_version": "0.164.0",
+  "assets": [
+    {
+      "path": "uv/0.13.5/uv-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-aarch64-apple-darwin.tar.gz",
+      "sha256": "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73",
+      "size": 14365303
+    },
+    {
+      "path": "uv/0.13.5/uv-x86_64-apple-darwin.tar.gz",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-apple-darwin.tar.gz",
+      "sha256": "b0f52b0e3945b4107d89024ea38e625683011fbfc05a0d98f9fa2d6dcee28c66",
+      "size": 17167423
+    },
+    {
+      "path": "uv/0.13.5/uv-aarch64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "7906c79adb21c81abd559841ba76bb1d9af9d791acac7a041b2972e03ae16538",
+      "size": 17006090
+    },
+    {
+      "path": "uv/0.13.5/uv-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "57ef9d9ccb01fb1bd998df995b0dd221b52f7d7841fbea93f2d4463bf61fb7a9",
+      "size": 18409974
+    },
+    {
+      "path": "uv/0.13.5/uv-aarch64-pc-windows-msvc.zip",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-aarch64-pc-windows-msvc.zip",
+      "sha256": "09f47edf90726084a70f9426f6e3ca4f46e9bf7cbf23b1716ec64d60b055fae3",
+      "size": 15439089
+    },
+    {
+      "path": "uv/0.13.5/uv-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "a38b8d1902b7cfbc76b423ba1bb456f623f42064cdc72628b6075b89afd1019a",
+      "size": 15264056
+    },
+    {
+      "path": "codex/0.164.0/codex-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-aarch64-apple-darwin.tar.gz",
+      "sha256": "aa8299c169d80111aac05543ad2621c9bdbedb9bc252c905fe3f5a5baf9a4142",
+      "size": 101767166
+    },
+    {
+      "path": "codex/0.164.0/codex-x86_64-apple-darwin.tar.gz",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-x86_64-apple-darwin.tar.gz",
+      "sha256": "de6bbc013c56337f6ddd3f26dfbfd62aad5924cb68cd5ef6430538922bfa0e75",
+      "size": 110491441
+    },
+    {
+      "path": "codex/0.164.0/codex-aarch64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "29a507a2a3fd8f6cd94b96b762d281d299d15d7902dee6132d314b78cf9108eb",
+      "size": 106977873
+    },
+    {
+      "path": "codex/0.164.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "90dd0b03b28afcb7fa733a4f73b413db2916a47347efd43fb669cc1c774ee8e4",
+      "size": 114979035
+    },
+    {
+      "path": "codex/0.164.0/codex-aarch64-pc-windows-msvc.exe",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-aarch64-pc-windows-msvc.exe",
+      "sha256": "85362ade41746e3632ffba54457c92bf2f82d838a4abb2f4500f60861964bf0f",
+      "size": 298558256
+    },
+    {
+      "path": "codex/0.164.0/codex-x86_64-pc-windows-msvc.exe",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.164.0/codex-x86_64-pc-windows-msvc.exe",
+      "sha256": "6f267830b029ee25d9339864aa867cd45de9f8fd4c5ea007d2e63c13a0c66d36",
+      "size": 354558768
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-aarch64-apple-darwin-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-aarch64-apple-darwin-install_only_stripped.tar.gz",
+      "sha256": "8dc60610a82f1e73be7faf964383e02520f95f6e39592a5c37c3809f5a7b798e",
+      "size": 25286365
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-aarch64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-aarch64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "9287d32654828930872c8225f53618dac9b06dd3af5d4c3e9ab1c576e0741c96",
+      "size": 21009747
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "c6857c65b996701a5da104cbb49b35249c0c026dc0664239b04f7156aa88326a",
+      "size": 29455505
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-aarch64-unknown-linux-musl-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-aarch64-unknown-linux-musl-install_only_stripped.tar.gz",
+      "sha256": "5af630e7e458af4675ea9a39b220b80baed17bc7a3e22b0fc97115a54fa0e96e",
+      "size": 27928005
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-x86_64-apple-darwin-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-x86_64-apple-darwin-install_only_stripped.tar.gz",
+      "sha256": "ce9c748c8f7525c0052247edb2435fdb1cac89c77e687e0e199eaf2b827668c2",
+      "size": 25020318
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "56cde3b1a1dcc36576753cb408ee0c3568d211baafa0eee40423adc147c480f2",
+      "size": 21986637
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "f829adc9d888e76c8801b4799ed444188d35239fcae3a9808a99ec5cb0d8d92c",
+      "size": 35356674
+    },
+    {
+      "path": "python/20261021/cpython-3.13.17+20261021-x86_64-unknown-linux-musl-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-x86_64-unknown-linux-musl-install_only_stripped.tar.gz",
+      "sha256": "089e64ce3a7969382e4782e2051c12d6de143e9f7d102c89a8c8d54e7c554b90",
+      "size": 27695887
+    }
+  ]
+}

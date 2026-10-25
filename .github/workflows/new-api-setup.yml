@@ -1,0 +1,60 @@
+name: New API three-platform setup
+
+on:
+  push:
+    branches: ['codex/new-api-setup-*']
+    paths:
+      - 'tools/new_api_setup.py'
+      - 'tools/build_new_api_guide.py'
+      - 'tools/ci_new_api_setup.py'
+      - 'tools/new_api_bootstrap.*'
+      - 'tools/build_new_api_mirror.py'
+      - 'tools/new_api_mirror_assets.json'
+      - 'tools/ci_new_api_bootstrap.py'
+      - 'tests/test_new_api_setup.py'
+      - 'tests/test_new_api_mirror.py'
+      - 'scripts/new_api_auto_update.py'
+      - 'tests/test_new_api_auto_update.py'
+      - '.github/workflows/new-api-setup.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: One-click bootstrap with no Python or Codex dependency on PATH
+        shell: bash
+        run: python tools/ci_new_api_setup.py --bootstrap
+      - name: Verify bootstrap, login matrix, permissions, and real Responses client
+        shell: bash
+        run: |
+          if [ '${{ runner.os }}' = 'Linux' ] && command -v xvfb-run >/dev/null; then
+            xvfb-run -a python tools/ci_new_api_setup.py
+          else
+            python tools/ci_new_api_setup.py
+          fi
+      - name: Verify server mirror routing
+        run: python -m unittest tests.test_new_api_mirror -v
+      - name: Verify updater rollback and interruption recovery
+        if: runner.os == 'Linux'
+        run: python -m unittest tests.test_new_api_auto_update -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: newapi-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/newapi-test-result.json
+            ${{ runner.temp }}/newapi-bootstrap-result.json
+          if-no-files-found: warn
