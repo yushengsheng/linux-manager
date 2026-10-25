@@ -42,7 +42,7 @@ def install():
     print("Installed official Codex CLI " + VERSION + " into a job-owned directory.")
 
 
-def restricted_windows_child():
+def restricted_windows_child(bootstrap=False):
     """Use the same user SID but a token with admin group disabled and no privileges."""
     import msvcrt
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -81,7 +81,9 @@ def restricted_windows_child():
         startup.dwFlags = 0x100
         startup.hStdInput, startup.hStdOutput, startup.hStdError = handles[1], handles[0], handles[0]
         process = PROCESS()
-        command = ctypes.create_unicode_buffer(subprocess.list2cmdline([sys.executable, str(Path(__file__).resolve()), "--restricted-child"]))
+        arguments=[sys.executable, str(Path(__file__).resolve()), "--restricted-child"]
+        if bootstrap:arguments.append("--bootstrap")
+        command = ctypes.create_unicode_buffer(subprocess.list2cmdline(arguments))
         check(advapi.CreateProcessAsUserW(limited, None, command, None, None, True, 0, None, str(ROOT), ctypes.byref(startup), ctypes.byref(process)))
         try:
             waited = kernel.WaitForSingleObject(process.hProcess, 15 * 60 * 1000)
@@ -207,10 +209,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--restricted-child", action="store_true")
+    parser.add_argument("--bootstrap", action="store_true")
     options = parser.parse_args()
     if options.install:
         install()
     elif os.name == "nt" and not options.restricted_child and ctypes.windll.shell32.IsUserAnAdmin():
-        sys.exit(restricted_windows_child())
+        sys.exit(restricted_windows_child(options.bootstrap))
+    elif options.bootstrap:
+        from tools.ci_new_api_bootstrap import run as bootstrap_run
+        sys.exit(bootstrap_run())
     else:
         sys.exit(run())

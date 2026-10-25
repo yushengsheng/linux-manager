@@ -7,6 +7,8 @@ on:
       - 'tools/new_api_setup.py'
       - 'tools/build_new_api_guide.py'
       - 'tools/ci_new_api_setup.py'
+      - 'tools/new_api_bootstrap.*'
+      - 'tools/ci_new_api_bootstrap.py'
       - 'tests/test_new_api_setup.py'
       - '.github/workflows/new-api-setup.yml'
   workflow_dispatch:
@@ -27,12 +29,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install official CLI in job-owned directory
+      - name: One-click bootstrap with no Python or Codex dependency on PATH
         shell: bash
-        run: python tools/ci_new_api_setup.py --install
+        run: python tools/ci_new_api_setup.py --bootstrap
       - name: Verify bootstrap, login matrix, permissions, and real Responses client
         shell: bash
         run: |
@@ -45,5 +44,7 @@ jobs:
         if: always()
         with:
           name: newapi-${{ matrix.os }}
-          path: ${{ runner.temp }}/newapi-test-result.json
+          path: |
+            ${{ runner.temp }}/newapi-test-result.json
+            ${{ runner.temp }}/newapi-bootstrap-result.json
           if-no-files-found: warn
