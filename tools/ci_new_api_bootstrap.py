@@ -65,7 +65,9 @@ def run_client(mirror, gateway):
         if not ready.exists() or ready.read_text().strip() != fingerprint:
             raise RuntimeError('fixture_certificate_trust_failed')
         print(json.dumps({'bootstrap_stage': 'fixture_certificate_trusted'}), flush=True)
-        invoke = 'function Read-Host { $env:NEWAPI_SETUP_ORIGIN }; ' + server_commands(prepare_only=True)['Windows']
+        invoke = ("$blockedProxy=[Net.WebProxy]::new('http://localhost:9'); "
+                  "$blockedProxy.BypassProxyOnLocal=$true; [Net.WebRequest]::DefaultWebProxy=$blockedProxy; "
+                  'function Read-Host { $env:NEWAPI_SETUP_ORIGIN }; ' + server_commands(prepare_only=True)['Windows'])
         stdin = None
         args = [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.b64encode(invoke.encode("utf-16-le")).decode("ascii")]
     else:

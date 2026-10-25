@@ -53,10 +53,12 @@ Windows PowerShell：
 
 ## 验证记录
 
-本地 46 项定向检查通过，1 项 Windows 专属检查跳过；服务器真实 systemd/Nginx 隔离更新与失败数据库回滚已通过。服务器镜像已校验 20 个官方组件；新版三系统完整安装验收正在进行。
+2026-10-25 完整验收通过：[GitHub Actions 三系统记录](https://github.com/yushengsheng/linux-manager/actions/runs/40199134678)。macOS 14、Ubuntu 24.04、Windows Server 2022 均从一次性 HTTPS 镜像完成运行环境准备；客户端外部下载站被阻断，未预装 Python/Codex 时仍通过。Windows 使用禁用管理员组和权限的受限令牌运行客户端，未跳过 HTTPS 证书校验。
+
+本地 46 项定向检查通过，1 项 Windows 专属检查跳过；服务器 Linux 的 20 项更新恢复检查、真实 systemd/Nginx 隔离成功更新和失败数据库回滚均通过。真实服务器 20 个公开组件入口、源码摘要、macOS 安装准备及 Linux 普通用户全量准备已验证；生产服务健康、更新只读检查通过。测试配置使用虚拟密钥和合成登录记录，没有改动日常 Codex 连接。
 
 ## 服务器镜像维护
 
-源码和公开组件清单位于 `tools/new_api_setup.py` 与 `tools/new_api_mirror_assets.json`。服务器静态目录提供 `/client-setup/install.sh`、`install.ps1` 和按版本保存的组件。管理员用 `tools/build_new_api_mirror.py` 校验并准备镜像，通过 Nginx 提供 HTTPS，无需增加对外端口。组件包和真实连接资料不进入 Git 仓库。
+源码和公开组件清单位于 `tools/new_api_setup.py` 与 `tools/new_api_mirror_assets.json`。服务器静态目录提供 `/client-setup/install.sh`、`install.ps1` 和按版本保存的组件。管理员用 `tools/build_new_api_mirror.py` 校验并准备镜像，再用 `scripts/install_new_api_client_mirror.py` 发布到现有 Nginx HTTPS 入口；无需增加对外端口。发布前复核所有摘要，Nginx 检查失败会还原原配置。组件包和真实连接资料不进入 Git 仓库。
 
 开源依据：[uv](https://github.com/astral-sh/uv)（MIT/Apache-2.0）、[Python 构建](https://github.com/astral-sh/python-build-standalone)、[Codex CLI](https://github.com/openai/codex)（Apache-2.0）。

@@ -231,7 +231,7 @@ Windows PowerShell：
 
 ## 服务器镜像维护
 
-源码和公开组件清单位于 `tools/new_api_setup.py` 与 `tools/new_api_mirror_assets.json`。服务器静态目录提供 `/client-setup/install.sh`、`install.ps1` 和按版本保存的组件。管理员用 `tools/build_new_api_mirror.py` 校验并准备镜像，通过 Nginx 提供 HTTPS，无需增加对外端口。组件包和真实连接资料不进入 Git 仓库。
+源码和公开组件清单位于 `tools/new_api_setup.py` 与 `tools/new_api_mirror_assets.json`。服务器静态目录提供 `/client-setup/install.sh`、`install.ps1` 和按版本保存的组件。管理员用 `tools/build_new_api_mirror.py` 校验并准备镜像，再用 `scripts/install_new_api_client_mirror.py` 发布到现有 Nginx HTTPS 入口；无需增加对外端口。发布前复核所有摘要，Nginx 检查失败会还原原配置。组件包和真实连接资料不进入 Git 仓库。
 
 开源依据：[uv](https://github.com/astral-sh/uv)（MIT/Apache-2.0）、[Python 构建](https://github.com/astral-sh/python-build-standalone)、[Codex CLI](https://github.com/openai/codex)（Apache-2.0）。
 '''
