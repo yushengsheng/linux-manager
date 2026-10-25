@@ -38,7 +38,7 @@ class Gateway:
         self.cert = root / "test-cert.pem"
         key = root / "test-key.pem"
         configuration = root / "cert.conf"
-        configuration.write_text("[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,digitalSignature,keyEncipherment\n")
+        configuration.write_text("[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=New API Fixture Root CA\n[ext]\nbasicConstraints=critical,CA:TRUE\nsubjectKeyIdentifier=hash\nkeyUsage=critical,keyCertSign,digitalSignature,keyEncipherment\n")
         result = subprocess.run([executable, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "2",
             "-config", str(configuration), "-keyout", str(key), "-out", str(self.cert)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
@@ -49,7 +49,7 @@ class Gateway:
         key.replace(ca_key)
         csr, leaf = root / "server.csr", root / "server-cert.pem"
         leaf_configuration = root / "leaf.conf"
-        leaf_configuration.write_text("[ext]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
+        leaf_configuration.write_text("[ext]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
         for args in [["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", str(key), "-out", str(csr)],
                      ["x509", "-req", "-in", str(csr), "-CA", str(self.cert), "-CAkey", str(ca_key), "-CAcreateserial", "-days", "2", "-sha256", "-extfile", str(leaf_configuration), "-extensions", "ext", "-out", str(leaf)]]:
             process = subprocess.run([executable, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -246,6 +246,10 @@ class NewApiSetupTests(unittest.TestCase):
         result = setup.powershell(script)
         data = json.loads(result.stdout.decode("utf-8-sig"))
         self.assertTrue(data["protected"] and data["only_user"])
+        target.chmod(stat.S_IREAD)
+        try:
+            with self.assertRaises(setup.SetupError):setup.preflight(self.home)
+        finally:target.chmod(stat.S_IREAD | stat.S_IWRITE)
     def test_url_rejections_and_symlink_are_non_destructive(self):
         for value in ["http://gateway.invalid", "https://u:p@gateway.invalid", "https://gateway.invalid/keys", "https://gateway.invalid/?key=bad"]:
             with self.assertRaises(setup.SetupError):setup.normalize_url(value)
@@ -265,6 +269,21 @@ class NewApiSetupTests(unittest.TestCase):
             with self.assertRaisesRegex(setup.SetupError, "版本过旧"):
                 setup.discover_codex()
         self.assertFalse((self.home / "config.toml").exists())
+    def test_policy_override_rolls_back_instead_of_claiming_success(self):
+        target = self.home / "config.toml"
+        original = b'# retained\nmodel="previous"\n'
+        target.write_bytes(original)
+        class PolicyRpc:
+            def __init__(self, *args):pass
+            def close(self):pass
+            def call(self, method, params):
+                if method == "config/read":return {"layers": []}
+                target.write_bytes(b'model="gpt-6.1-sol"\n')
+                return {"status": "okOverridden"}
+        with mock.patch.object(setup, "Rpc", PolicyRpc):
+            with self.assertRaisesRegex(setup.SetupError, "管理策略"):
+                setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        self.assertEqual(target.read_bytes(), original)
 
 
 if __name__ == "__main__":
