@@ -280,14 +280,7 @@ class NewApiSetupTests(unittest.TestCase):
                 if method == "config/read":return {"layers": []}
                 target.write_bytes(b'model="gpt-6.1-sol"\n')
                 return {"status": "okOverridden"}
-        real_restrict = setup.restrict
-        phases = []
-        def traced_restrict(path, directory=False):
-            phases.append("directory" if directory else ("config" if path == target else "sidecar"))
-            try:return real_restrict(path, directory)
-            except setup.SetupError:
-                raise setup.SetupError("acl_failure_phase_" + str(len(phases)) + "_" + phases[-1]) from None
-        with mock.patch.object(setup, "Rpc", PolicyRpc), mock.patch.object(setup, "restrict", side_effect=traced_restrict):
+        with mock.patch.object(setup, "Rpc", PolicyRpc):
             with self.assertRaisesRegex(setup.SetupError, "管理策略"):
                 setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
         self.assertEqual(target.read_bytes(), original)

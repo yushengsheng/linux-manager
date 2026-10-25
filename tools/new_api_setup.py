@@ -60,6 +60,11 @@ def restrict(path, directory=False):
 $ErrorActionPreference='Stop'
 $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PATH'))
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$existing=Get-Acl -LiteralPath $p
+$rules=@($existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+$bad=@($rules|Where-Object {$_.IdentityReference.Value -ne $sid.Value -or $_.AccessControlType -ne 'Allow' -or $_.IsInherited})
+$full=@($rules|Where-Object {($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl})
+if($existing.AreAccessRulesProtected -and $bad.Count -eq 0 -and $full.Count -gt 0){exit 0}
 $acl=New-Object Security.AccessControl.KIND
 $acl.SetAccessRuleProtection($true,$false)
 $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','INHERIT','None','Allow')
