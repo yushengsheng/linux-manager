@@ -27,6 +27,7 @@ def run():
 
 
 def run_client(mirror, gateway):
+    from tools.build_new_api_guide import server_commands
     home = Path(os.environ["RUNNER_TEMP"]) / "newapi-bootstrap-home"
     home.mkdir(exist_ok=True)
     env = dict(os.environ)
@@ -54,17 +55,13 @@ def run_client(mirror, gateway):
             raise RuntimeError('fixture_certificate_trust_failed')
         trust_added = True
         print(json.dumps({'bootstrap_stage': 'fixture_certificate_trusted'}), flush=True)
-        script = downloaded.decode('utf-8')
-        source = base64.b64encode(script.encode("utf-8")).decode("ascii")
-        invoke = "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + source + "')))) -PrepareOnly"
+        invoke = 'function Read-Host { $env:NEWAPI_SETUP_ORIGIN }; ' + server_commands(prepare_only=True)['Windows']
         stdin = None
         args = [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.b64encode(invoke.encode("utf-16-le")).decode("ascii")]
     else:
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
-        stdin = None
-        script = Path(os.environ['RUNNER_TEMP']) / 'fixture-install.sh'
-        script.write_bytes(downloaded)
-        args = ["/bin/sh", str(script), "--prepare-only"]
+        stdin = (env['NEWAPI_SETUP_ORIGIN'] + '\n').encode('utf-8')
+        args = ["/bin/sh", '-c', server_commands(prepare_only=True)['Linux']]
     try:
         print(json.dumps({'bootstrap_stage': 'run_server_only_client'}), flush=True)
         result = subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=420)

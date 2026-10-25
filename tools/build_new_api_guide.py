@@ -162,11 +162,11 @@ TEST_REPORT
     return len(source), {k: len(v) for k, v in entries.items()}
 
 
-def server_commands(restore=False):
+def server_commands(restore=False, prepare_only=False):
     import shlex
     loader = """set -eu; origin=${NEWAPI_SETUP_ORIGIN%/}; origin=${origin%/v1}; case "$origin" in https://*) ;; *) exit 1 ;; esac; authority=${origin#https://}; case "$authority" in *'@'*|*'?'*|*'#'*|*' '*|*/*) printf '%s\\n' '请使用 HTTPS 根地址，勿带账号或后台路径。' >&2; exit 1 ;; esac; export NEWAPI_SETUP_ORIGIN="$origin"; file=$(mktemp); trap 'rm -f "$file"' EXIT HUP INT TERM; curl --proto '=https' --tlsv1.2 -fsS "$origin/client-setup/install.sh" -o "$file"; sh "$file" "$@" """
-    unix = "printf 'New API HTTPS 地址： '; IFS= read -r NEWAPI_SETUP_ORIGIN; export NEWAPI_SETUP_ORIGIN; sh -c " + shlex.quote(loader) + ' newapi' + (' --restore' if restore else '')
-    windows = "& { $env:NEWAPI_SETUP_ORIGIN=(Read-Host 'New API HTTPS 地址').TrimEnd('/') -replace '/v1$',''; try { $u=[Uri]$env:NEWAPI_SETUP_ORIGIN; if($u.Scheme -ne 'https' -or !$u.Host -or $u.UserInfo -or $u.Query -or $u.Fragment -or $u.AbsolutePath -ne '/'){throw 'invalid_address'}; & ([scriptblock]::Create((Invoke-RestMethod -MaximumRedirection 0 -Uri ($env:NEWAPI_SETUP_ORIGIN+'/client-setup/install.ps1'))))" + (' -Restore' if restore else '') + "; if($LASTEXITCODE -ne 0){throw 'setup_failed'} } catch { Write-Error '服务器配置命令未完成，请检查地址、网络或上方提示。' } }"
+    unix = "printf 'New API HTTPS 地址： '; IFS= read -r NEWAPI_SETUP_ORIGIN; export NEWAPI_SETUP_ORIGIN; sh -c " + shlex.quote(loader) + ' newapi' + (' --restore' if restore else ' --prepare-only' if prepare_only else '')
+    windows = "& { $env:NEWAPI_SETUP_ORIGIN=(Read-Host 'New API HTTPS 地址').TrimEnd('/') -replace '/v1$',''; try { $u=[Uri]$env:NEWAPI_SETUP_ORIGIN; if($u.Scheme -ne 'https' -or !$u.Host -or $u.UserInfo -or $u.Query -or $u.Fragment -or $u.AbsolutePath -ne '/'){throw 'invalid_address'}; & ([scriptblock]::Create((Invoke-RestMethod -MaximumRedirection 0 -Uri ($env:NEWAPI_SETUP_ORIGIN+'/client-setup/install.ps1'))))" + (' -Restore' if restore else ' -PrepareOnly' if prepare_only else '') + "; if($LASTEXITCODE -ne 0){throw 'setup_failed'} } catch { Write-Error '服务器配置命令未完成，请检查地址、网络或上方提示。' } }"
     return {"macOS": unix, "Linux": unix, "Windows": windows}
 
 

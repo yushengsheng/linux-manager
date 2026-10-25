@@ -84,6 +84,7 @@ class Gateway:
                         return self.reply({'error': 'missing_fixture_asset'}, 404)
                     gateway.downloads.append(relative)
                     self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8' if path.suffix in ('.sh', '.ps1', '.py') else 'application/octet-stream')
                     self.send_header('Content-Length', str(path.stat().st_size))
                     self.send_header('Connection', 'close')
                     self.end_headers()
