@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import ssl
 import urllib.request
 
@@ -19,7 +20,7 @@ def run():
     mirror = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-mirror'
     build(mirror, current_platform=True)
     print(json.dumps({'bootstrap_stage': 'mirror_verified'}), flush=True)
-    gateway = Gateway(Path(tempfile.mkdtemp(prefix='mirror-tls-')), mirror=mirror)
+    gateway = Gateway(Path(tempfile.mkdtemp(prefix='mirror-tls-', dir=os.environ['RUNNER_TEMP'])), mirror=mirror)
     try:
         return run_client(mirror, gateway)
     finally:
@@ -45,15 +46,21 @@ def run_client(mirror, gateway):
         downloaded = response.read(128 * 1024)
     if downloaded != (mirror / ('install.ps1' if os.name == 'nt' else 'install.sh')).read_bytes():
         raise RuntimeError('bootstrap_download_mismatch')
-    trust_added = False
     if os.name == "nt":
         shell = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
         env["PATH"] = os.pathsep.join([str(Path(shell).parent), str(Path(os.environ["SystemRoot"]) / "System32"), os.environ["SystemRoot"]])
         print(json.dumps({'bootstrap_stage': 'trust_fixture_certificate'}), flush=True)
-        trusted = subprocess.run(['certutil', '-user', '-f', '-addstore', 'Root', str(gateway.cert)], capture_output=True, timeout=45)
-        if trusted.returncode:
+        if os.environ.get('NEWAPI_CI_PARENT_TRUST') != '1':
+            raise RuntimeError('fixture_requires_admin_test_parent')
+        request = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-trust-request.json'
+        ready = request.with_suffix('.ready')
+        fingerprint = hashlib.sha1(ssl.PEM_cert_to_DER_cert(gateway.cert.read_text())).hexdigest()
+        request.write_text(json.dumps({'certificate': str(gateway.cert)}))
+        deadline = time.monotonic() + 60
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.2)
+        if not ready.exists() or ready.read_text().strip() != fingerprint:
             raise RuntimeError('fixture_certificate_trust_failed')
-        trust_added = True
         print(json.dumps({'bootstrap_stage': 'fixture_certificate_trusted'}), flush=True)
         invoke = 'function Read-Host { $env:NEWAPI_SETUP_ORIGIN }; ' + server_commands(prepare_only=True)['Windows']
         stdin = None
@@ -62,14 +69,8 @@ def run_client(mirror, gateway):
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         stdin = (env['NEWAPI_SETUP_ORIGIN'] + '\n').encode('utf-8')
         args = ["/bin/sh", '-c', server_commands(prepare_only=True)['Linux']]
-    try:
-        print(json.dumps({'bootstrap_stage': 'run_server_only_client'}), flush=True)
-        result = subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=420)
-    finally:
-        if trust_added:
-            import hashlib as _hashlib
-            der = ssl.PEM_cert_to_DER_cert(gateway.cert.read_text())
-            subprocess.run(['certutil', '-user', '-delstore', 'Root', _hashlib.sha1(der).hexdigest()], capture_output=True, timeout=30)
+    print(json.dumps({'bootstrap_stage': 'run_server_only_client'}), flush=True)
+    result = subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=420)
     # No keys or user data enter this process; still avoid dumping runtime paths.
     if result.returncode:
         error = result.stderr.decode("utf-8", "replace")

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -74,6 +75,12 @@ def restricted_windows_child(bootstrap=False):
     group = SIDATTR(sid, 0)
     check(advapi.CreateRestrictedToken(token, 0x1, 1, ctypes.byref(group), 0, None, 0, None, ctypes.byref(limited)))
     log = Path(os.environ["RUNNER_TEMP"]) / "newapi-restricted-test.log"
+    trust_request = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-trust-request.json'
+    trust_ready = trust_request.with_suffix('.ready')
+    trusted_fingerprint = None
+    if bootstrap:
+        trust_request.unlink(missing_ok=True)
+        trust_ready.unlink(missing_ok=True)
     with log.open("wb") as output, open(os.devnull, "rb") as input_file:
         handles = [msvcrt.get_osfhandle(output.fileno()), msvcrt.get_osfhandle(input_file.fileno())]
         for handle in handles:os.set_handle_inheritable(handle, True)
@@ -85,14 +92,38 @@ def restricted_windows_child(bootstrap=False):
         arguments=[sys.executable, str(Path(__file__).resolve()), "--restricted-child"]
         if bootstrap:arguments.append("--bootstrap")
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline(arguments))
-        check(advapi.CreateProcessAsUserW(limited, None, command, None, None, True, 0, None, str(ROOT), ctypes.byref(startup), ctypes.byref(process)))
+        previous_parent_trust = os.environ.get('NEWAPI_CI_PARENT_TRUST')
+        if bootstrap:
+            os.environ['NEWAPI_CI_PARENT_TRUST'] = '1'
+        try:
+            check(advapi.CreateProcessAsUserW(limited, None, command, None, None, True, 0, None, str(ROOT), ctypes.byref(startup), ctypes.byref(process)))
+        finally:
+            if previous_parent_trust is None:
+                os.environ.pop('NEWAPI_CI_PARENT_TRUST', None)
+            else:
+                os.environ['NEWAPI_CI_PARENT_TRUST'] = previous_parent_trust
         try:
             deadline = time.monotonic() + 15 * 60
             offset = 0
+            progress_time = time.monotonic()
             while True:
-                waited = kernel.WaitForSingleObject(process.hProcess, 30000)
+                waited = kernel.WaitForSingleObject(process.hProcess, 1000)
                 if waited != 258 or time.monotonic() >= deadline:
                     break
+                if bootstrap and trusted_fingerprint is None and trust_request.exists():
+                    certificate = Path(json.loads(trust_request.read_text())['certificate']).resolve()
+                    if not certificate.is_relative_to(Path(os.environ['RUNNER_TEMP']).resolve()):
+                        raise RuntimeError('fixture_certificate_outside_test_directory')
+                    fingerprint = hashlib.sha1(ssl.PEM_cert_to_DER_cert(certificate.read_text())).hexdigest()
+                    # Only the CI parent trusts the disposable CA. The client stays non-admin.
+                    trusted = subprocess.run(['certutil', '-f', '-addstore', 'Root', str(certificate)], capture_output=True, timeout=30)
+                    if trusted.returncode:
+                        raise RuntimeError('fixture_machine_certificate_trust_failed')
+                    trusted_fingerprint = fingerprint
+                    trust_ready.write_text(fingerprint)
+                if time.monotonic() - progress_time < 30:
+                    continue
+                progress_time = time.monotonic()
                 # Only synthetic fixture diagnostics enter this log.
                 progress = log.read_text(encoding='utf-8', errors='replace')
                 if len(progress) > offset:
@@ -104,6 +135,8 @@ def restricted_windows_child(bootstrap=False):
             code = wintypes.DWORD()
             check(kernel.GetExitCodeProcess(process.hProcess, ctypes.byref(code)))
         finally:
+            if trusted_fingerprint:
+                subprocess.run(['certutil', '-delstore', 'Root', trusted_fingerprint], capture_output=True, timeout=30)
             kernel.CloseHandle(process.hThread)
             kernel.CloseHandle(process.hProcess)
     kernel.CloseHandle(token)
