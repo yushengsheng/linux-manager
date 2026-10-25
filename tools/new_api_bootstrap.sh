@@ -35,6 +35,8 @@ uv="$work/uv-$target/uv"
 chmod 700 "$uv"
 export UV_CACHE_DIR="$runtime/cache"
 export UV_PYTHON_INSTALL_DIR="$runtime/python"
+export PYTHONIOENCODING=utf-8
+export PYTHONUTF8=1
 # Managed Python avoids depending on Command Line Tools/Homebrew/system Python.
 if [ -t 0 ]; then
   "$uv" run --no-project --no-config --managed-python --python 3.13 "$work/setup.py" --auto-prepare "$@"

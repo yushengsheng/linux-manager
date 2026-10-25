@@ -27,8 +27,9 @@ try {
   Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $work 'uv')
   $uv=(Get-ChildItem -Path (Join-Path $work 'uv') -Filter uv.exe -Recurse | Select-Object -First 1).FullName
   if(!$uv){throw '官方运行组件结构异常。'}
-  $previousCache=$env:UV_CACHE_DIR;$previousPython=$env:UV_PYTHON_INSTALL_DIR
+  $previousCache=$env:UV_CACHE_DIR;$previousPython=$env:UV_PYTHON_INSTALL_DIR;$previousEncoding=$env:PYTHONIOENCODING;$previousUtf8=$env:PYTHONUTF8
   $env:UV_CACHE_DIR=Join-Path $runtime 'cache';$env:UV_PYTHON_INSTALL_DIR=Join-Path $runtime 'python'
+  $env:PYTHONIOENCODING='utf-8';$env:PYTHONUTF8='1'
   try {
     $arguments=@('run','--no-project','--no-config','--managed-python','--python','3.13',$script,'--auto-prepare')
     if($PrepareOnly){$arguments+='--prepare-only'}
@@ -36,9 +37,10 @@ try {
     if($Terminal){$arguments+='--terminal'}
     & $uv @arguments
     if($LASTEXITCODE -ne 0){throw '自动配置未完成，请查看上方提示。'}
-  }finally{$env:UV_CACHE_DIR=$previousCache;$env:UV_PYTHON_INSTALL_DIR=$previousPython}
+  }finally{$env:UV_CACHE_DIR=$previousCache;$env:UV_PYTHON_INSTALL_DIR=$previousPython;$env:PYTHONIOENCODING=$previousEncoding;$env:PYTHONUTF8=$previousUtf8}
 }catch{
-  Write-Error ('未完成：'+$_.Exception.Message+' 不需要预先切换管理员或关闭执行策略。')
+  [Console]::Error.WriteLine('未完成：'+$_.Exception.Message+' 不需要预先切换管理员或关闭执行策略。')
+  exit 1
 }finally{
   if($work -and (Test-Path -LiteralPath $work)){Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue}
 }

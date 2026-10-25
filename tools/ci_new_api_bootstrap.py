@@ -35,7 +35,7 @@ def run():
         error = result.stderr.decode("utf-8", "replace")
         import re
         error = re.sub(r'(?:[A-Za-z]:\\|/(?:Users|private|home|var|tmp)/)[^\s\"<>]+', '[runner_path]', error)
-        print(json.dumps({"bootstrap_failed": True, "exit": result.returncode, "diagnostic": error[-2000:]}, ensure_ascii=True))
+        print(json.dumps({"bootstrap_failed": True, "exit": result.returncode, "diagnostic_head": error[:2500], "diagnostic_tail": error[-1200:]}, ensure_ascii=True))
         return result.returncode
     executable = home / "newapi-runtime/codex-0.164.0" / ("codex.exe" if os.name == "nt" else "codex")
     if not executable.is_file() or (home / "config.toml").exists():
