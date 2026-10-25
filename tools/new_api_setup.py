@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,14 @@ PROVIDER = "newapi_gateway"
 MODEL = "gpt-6.1-sol"
 MIN_VERSION = (0, 164, 0)
 LIMIT = 4 * 1024 * 1024
+CODEX_DIGESTS = {
+    "aarch64-apple-darwin": "aa8299c169d80111aac05543ad2621c9bdbedb9bc252c905fe3f5a5baf9a4142",
+    "x86_64-apple-darwin": "de6bbc013c56337f6ddd3f26dfbfd62aad5924cb68cd5ef6430538922bfa0e75",
+    "aarch64-unknown-linux-musl": "29a507a2a3fd8f6cd94b96b762d281d299d15d7902dee6132d314b78cf9108eb",
+    "x86_64-unknown-linux-musl": "90dd0b03b28afcb7fa733a4f73b413db2916a47347efd43fb669cc1c774ee8e4",
+    "aarch64-pc-windows-msvc": "85362ade41746e3632ffba54457c92bf2f82d838a4abb2f4500f60861964bf0f",
+    "x86_64-pc-windows-msvc": "6f267830b029ee25d9339864aa867cd45de9f8fd4c5ea007d2e63c13a0c66d36",
+}
 
 
 class SetupError(Exception):
@@ -165,6 +174,59 @@ def cli_command(path):
         # Avoid PowerShell .ps1 execution-policy problems with npm's command shim.
         return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(path)]
     return [str(path)]
+
+
+def prepare_codex(home):
+    """Reuse working installations; otherwise install a private official CLI copy."""
+    try:
+        return discover_codex()
+    except SetupError:
+        pass
+    architecture = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64", "amd64": "x86_64"}.get(platform.machine().lower())
+    system = "apple-darwin" if sys.platform == "darwin" else "pc-windows-msvc" if os.name == "nt" else "unknown-linux-musl"
+    target = str(architecture) + "-" + system
+    if target not in CODEX_DIGESTS:
+        raise SetupError("当前处理器不在已支持的 64 位平台中，已停止安装。")
+    directory = home / "newapi-runtime" / "codex-0.164.0"
+    if directory.is_symlink() or directory.parent.is_symlink():
+        raise SetupError("运行目录是符号链接，已停止安装。")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    executable = directory / ("codex.exe" if os.name == "nt" else "codex")
+    # An earlier private copy is still version-checked, never blindly trusted.
+    if executable.is_file():
+        checked = subprocess.run([str(executable), "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        if not checked.returncode and b"codex-cli 0.164.0" in checked.stdout:
+            return [str(executable)]
+    name = "codex-" + target + (".exe" if os.name == "nt" else ".tar.gz")
+    url = "https://github.com/openai/codex/releases/download/rust-v0.164.0/" + name
+    print("正在自动准备官方 Codex CLI（当前用户目录，无需管理员权限）…", flush=True)
+    context = ssl.create_default_context()
+    if Path("/etc/ssl/cert.pem").is_file():context.load_verify_locations("/etc/ssl/cert.pem")
+    with tempfile.TemporaryDirectory(prefix="codex-download-", dir=directory) as temporary:
+        archive = Path(temporary) / name
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(url, context=context, timeout=120) as response, archive.open("wb") as output:
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:break
+                digest.update(block)
+                output.write(block)
+        if digest.hexdigest() != CODEX_DIGESTS[target]:
+            raise SetupError("Codex 官方下载校验失败，未运行下载文件。")
+        if os.name == "nt":
+            data = archive.read_bytes()
+        else:
+            with tarfile.open(archive) as stream:
+                members = [member for member in stream.getmembers() if member.isfile() and Path(member.name).name in {"codex", "codex-" + target}]
+                if len(members) != 1:
+                    raise SetupError("官方 Codex 压缩包结构异常，未安装。")
+                data = stream.extractfile(members[0]).read()
+        private_write(executable, data)
+        if os.name != "nt":executable.chmod(0o700)
+    checked = subprocess.run([str(executable), "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    if checked.returncode or b"codex-cli 0.164.0" not in checked.stdout:
+        raise SetupError("官方 Codex CLI 未能启动；请检查系统兼容性或应用控制策略。")
+    return [str(executable)]
 
 
 def normalize_url(value):
@@ -426,6 +488,8 @@ def main():
     parser = argparse.ArgumentParser(description="直接输入 New API 地址和密钥，自动配置 Codex。")
     parser.add_argument("--terminal", action="store_true", help="使用终端输入，适合 SSH/无桌面 Linux")
     parser.add_argument("--restore", action="store_true", help="恢复本命令最近一次切换前的配置")
+    parser.add_argument("--auto-prepare", action="store_true", help="自动准备缺失的用户版 CLI")
+    parser.add_argument("--prepare-only", action="store_true", help="仅准备运行环境，不读取密钥或修改连接")
     options = parser.parse_args()
     if os.name != "nt" and os.geteuid() == 0:
         raise SetupError("请用日常桌面用户运行，不要 sudo 或 root；否则会给错误的账号配置。")
@@ -435,7 +499,10 @@ def main():
         restore(home)
         print("已恢复切换前配置；请完全退出并重新打开 Codex。")
         return
-    command = discover_codex()
+    command = prepare_codex(home) if options.auto_prepare else discover_codex()
+    if options.prepare_only:
+        print("运行环境已就绪。", flush=True)
+        return
     if options.terminal:
         url, key = prompt_terminal()
     elif sys.platform == "darwin":
