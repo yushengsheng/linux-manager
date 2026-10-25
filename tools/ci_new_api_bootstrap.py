@@ -59,7 +59,7 @@ def run():
     else:
         summary["non_root_process"] = os.geteuid() != 0
     (Path(os.environ["RUNNER_TEMP"]) / "newapi-bootstrap-result.json").write_text(json.dumps(summary))
-    if os.environ.get("GITHUB_ENV"):
+    if os.environ.get("GITHUB_ENV") and os.name != "nt":
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
             output.write("NEWAPI_CODEX_BINARY=" + str(executable) + "\n")
     print(json.dumps(summary))

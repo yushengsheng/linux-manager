@@ -99,6 +99,13 @@ def restricted_windows_child(bootstrap=False):
     kernel.CloseHandle(limited)
     # Log contains only test fixtures; do not print config snapshots or certificate material.
     print(log.read_text(encoding="utf-8", errors="replace"))
+    if bootstrap and code.value == 0 and os.environ.get("GITHUB_ENV"):
+        # The runner's command file is service-owned, deliberately not writable by
+        # our non-admin child. Publish the verified executable from the parent.
+        executable = Path(os.environ["RUNNER_TEMP"]) / "newapi-bootstrap-home/newapi-runtime/codex-0.164.0/codex.exe"
+        if not executable.is_file():raise RuntimeError("verified_bootstrap_cli_missing")
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+            output.write("NEWAPI_CODEX_BINARY=" + str(executable) + "\n")
     return code.value
 
 
