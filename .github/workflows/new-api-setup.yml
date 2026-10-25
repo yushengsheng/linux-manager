@@ -1,0 +1,49 @@
+name: New API three-platform setup
+
+on:
+  push:
+    branches: ['codex/new-api-setup-*']
+    paths:
+      - 'tools/new_api_setup.py'
+      - 'tools/build_new_api_guide.py'
+      - 'tools/ci_new_api_setup.py'
+      - 'tests/test_new_api_setup.py'
+      - '.github/workflows/new-api-setup.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install official CLI in job-owned directory
+        shell: bash
+        run: python tools/ci_new_api_setup.py --install
+      - name: Verify bootstrap, login matrix, permissions, and real Responses client
+        shell: bash
+        run: |
+          if [ '${{ runner.os }}' = 'Linux' ] && command -v xvfb-run >/dev/null; then
+            xvfb-run -a python tools/ci_new_api_setup.py
+          else
+            python tools/ci_new_api_setup.py
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: newapi-${{ matrix.os }}
+          path: ${{ runner.temp }}/newapi-test-result.json
+          if-no-files-found: warn
