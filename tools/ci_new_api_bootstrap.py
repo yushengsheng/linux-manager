@@ -34,6 +34,7 @@ def run_client(mirror, gateway):
     env = dict(os.environ)
     env["CODEX_HOME"] = str(home)
     env.pop("NEWAPI_CODEX_BINARY", None)
+    env['NEWAPI_CI_DIAGNOSTICS'] = '1'
     env.update(NEWAPI_SETUP_ORIGIN=gateway.base.removesuffix('/v1'),
                SSL_CERT_FILE=str(gateway.cert), CURL_CA_BUNDLE=str(gateway.cert),
                UV_SYSTEM_CERTS='true', NO_PROXY='localhost,127.0.0.1,::1', no_proxy='localhost,127.0.0.1,::1')
@@ -55,7 +56,9 @@ def run_client(mirror, gateway):
         request = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-trust-request.json'
         ready = request.with_suffix('.ready')
         fingerprint = hashlib.sha1(ssl.PEM_cert_to_DER_cert(gateway.cert.read_text())).hexdigest()
-        request.write_text(json.dumps({'certificate': str(gateway.cert)}))
+        temporary = request.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'certificate': str(gateway.cert)}))
+        temporary.replace(request)
         deadline = time.monotonic() + 60
         while not ready.exists() and time.monotonic() < deadline:
             time.sleep(.2)

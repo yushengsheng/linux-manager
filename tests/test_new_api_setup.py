@@ -89,7 +89,10 @@ class Gateway:
                     self.send_header('Connection', 'close')
                     self.end_headers()
                     with path.open('rb') as stream:
-                        shutil.copyfileobj(stream, self.wfile, 1024 * 1024)
+                        try:
+                            shutil.copyfileobj(stream, self.wfile, 1024 * 1024)
+                        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+                            pass
                     return
                 if not self.allowed():
                     return self.reply({"error": {"message": "fixture rejected"}}, 401)

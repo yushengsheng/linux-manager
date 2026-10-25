@@ -4,6 +4,7 @@ $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 $work=$null
+$stage='address'
 try {
   $origin=$env:NEWAPI_SETUP_ORIGIN.TrimEnd('/') -replace '/v1$',''
   $parsed=[Uri]$origin
@@ -24,12 +25,15 @@ try {
     default {throw '当前处理器不在已支持的 64 位平台中。'}
   }
   $script=Join-Path $work 'setup.py'
+  $stage='download_setup'
   $setupDigest='__SETUP_SHA256__'
   Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "$base/releases/$setupDigest/new_api_setup.py" -OutFile $script
   if((Get-FileHash -Algorithm SHA256 -LiteralPath $script).Hash.ToLowerInvariant() -ne $setupDigest){throw '配置程序校验失败，未执行。'}
   $archive=Join-Path $work 'uv.zip'
+  $stage='download_uv'
   Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "$base/uv/0.13.5/uv-$target.zip" -OutFile $archive
   if((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() -ne $digest){throw '运行组件校验失败，未执行。'}
+  $stage='extract_uv'
   Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $work 'uv')
   $uv=(Get-ChildItem -Path (Join-Path $work 'uv') -Filter uv.exe -Recurse | Select-Object -First 1).FullName
   if(!$uv){throw '官方运行组件结构异常。'}
@@ -39,16 +43,27 @@ try {
   $env:UV_CACHE_DIR=Join-Path $runtime 'cache';$env:UV_PYTHON_INSTALL_DIR=Join-Path $runtime 'python'
   $env:UV_PYTHON_DOWNLOADS_JSON_URL=$null;$env:PYTHONIOENCODING='utf-8';$env:PYTHONUTF8='1';$env:NEWAPI_DOWNLOAD_BASE=$base
   try {
-    & $uv python install 3.13.17 --mirror "$base/python" --no-bin --no-registry --no-config --system-certs *> (Join-Path $work 'python-log')
-    if($LASTEXITCODE -ne 0){throw '无法从服务器准备 Python；未修改连接配置。'}
+    $stage='install_python'
+    $previousErrors=$ErrorActionPreference
+    try {
+      # Windows PowerShell treats redirected native stderr as ErrorRecord objects.
+      $ErrorActionPreference='Continue'
+      & $uv python install 3.13.17 --mirror "$base/python" --no-bin --no-registry --no-config --system-certs *> (Join-Path $work 'python-log')
+      $pythonExit=$LASTEXITCODE
+    }finally{$ErrorActionPreference=$previousErrors}
+    if($pythonExit -ne 0){throw '无法从服务器准备 Python；未修改连接配置。'}
     $arguments=@('run','--offline','--no-project','--no-config','--managed-python','--python','3.13.17',$script,'--auto-prepare')
     if($PrepareOnly){$arguments+='--prepare-only'}
     if($Restore){$arguments+='--restore'}
     if($Terminal){$arguments+='--terminal'}
+    $stage='configure_client'
     & $uv @arguments
     if($LASTEXITCODE -ne 0){throw '自动配置未完成，请查看上方提示。'}
   }finally{foreach($name in $names){[Environment]::SetEnvironmentVariable($name,$previous[$name],'Process')}}
 }catch{
+  if($env:NEWAPI_CI_DIAGNOSTICS -eq '1'){
+    [Console]::Error.WriteLine((@{stage=$stage;error_type=$_.Exception.GetType().FullName;line=$_.InvocationInfo.ScriptLineNumber}|ConvertTo-Json -Compress))
+  }
   [Console]::Error.WriteLine('自动配置未完成；请检查服务器网络、HTTPS 证书、系统权限或上方提示。无需关闭执行策略或 UAC。')
   exit 1
 }finally{
