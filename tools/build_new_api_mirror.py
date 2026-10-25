@@ -26,7 +26,7 @@ def sha256(path):
 def build(destination, download=True, current_platform=False):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    manifest = json.loads((ROOT / 'tools/new_api_mirror_assets.json').read_text())
+    manifest = json.loads((ROOT / 'tools/new_api_mirror_assets.json').read_text(encoding='utf-8'))
     if current_platform:
         architecture = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'amd64': 'x86_64', 'x86_64': 'x86_64'}[platform.machine().lower()]
         system = 'apple-darwin' if sys.platform == 'darwin' else 'pc-windows-msvc' if os.name == 'nt' else 'unknown-linux-'
@@ -69,7 +69,7 @@ def build(destination, download=True, current_platform=False):
     release.mkdir(parents=True, exist_ok=True)
     (release / 'new_api_setup.py').write_bytes(source)
     for suffix in ('sh', 'ps1'):
-        template = (ROOT / ('tools/new_api_bootstrap.' + suffix)).read_text()
+        template = (ROOT / ('tools/new_api_bootstrap.' + suffix)).read_text(encoding='utf-8')
         (destination / ('install.' + suffix)).write_text(template.replace('__SETUP_SHA256__', digest), encoding='utf-8')
     public = dict(manifest, setup_sha256=digest)
     (destination / 'manifest.json').write_text(json.dumps(public, indent=2) + '\n')

@@ -15,7 +15,7 @@ SPEC.loader.exec_module(setup)
 
 class NewApiMirrorTests(unittest.TestCase):
     def test_every_supported_platform_has_pinned_uv_python_and_codex_assets(self):
-        assets = json.loads((ROOT / 'tools/new_api_mirror_assets.json').read_text())['assets']
+        assets = json.loads((ROOT / 'tools/new_api_mirror_assets.json').read_text(encoding='utf-8'))['assets']
         self.assertEqual(len(assets), 20)
         for target, digest in setup.CODEX_DIGESTS.items():
             for prefix in ('uv/', 'codex/'):
@@ -45,7 +45,7 @@ class NewApiMirrorTests(unittest.TestCase):
 
     def test_bootstrap_templates_have_no_external_download_url(self):
         for suffix in ('sh', 'ps1'):
-            text = (ROOT / ('tools/new_api_bootstrap.' + suffix)).read_text()
+            text = (ROOT / ('tools/new_api_bootstrap.' + suffix)).read_text(encoding='utf-8')
             self.assertNotIn('github.com', text)
             self.assertNotIn('astral.sh', text)
             self.assertIn('--offline', text)
