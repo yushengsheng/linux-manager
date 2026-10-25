@@ -8,10 +8,12 @@ import zlib
 ROOT = Path(__file__).parents[1]
 
 
-def commands():
-    source = (ROOT / "tools/new_api_setup.py").read_bytes()
+def commands(check_only=False):
+    source = (ROOT / "tools/new_api_setup.py").read_text(encoding="utf-8").encode("utf-8")
     payload = base64.b64encode(zlib.compress(source, 9)).decode("ascii")
-    loader = "import sys,base64,zlib;assert sys.version_info>=(3,11),'Python 3.11+ required';exec(compile(zlib.decompress(base64.b64decode('" + payload + "')),'<newapi-setup>','exec'))"
+    body = "zlib.decompress(base64.b64decode('" + payload + "'))"
+    action = "print(__import__('hashlib').sha256(" + body + ").hexdigest())" if check_only else "exec(compile(" + body + ",'<newapi-setup>','exec'))"
+    loader = "import sys,base64,zlib;assert sys.version_info>=(3,11),'Python 3.11+ required';" + action
     unix = "python3 -c " + "'" + loader.replace("'", '"') + "'"
     windows = '& { $c="' + loader + '"; $p=Get-Command py.exe -ErrorAction SilentlyContinue; if($p){ & $p.Source -3 -c $c }else{ $p=Get-Command python.exe -ErrorAction SilentlyContinue; if(!$p -or $p.Source -like "*WindowsApps*"){throw "Please install Python 3.11+ from python.org with the Python launcher, then retry."}; & $p.Source -c $c } }'
     assert all("\n" not in command for command in [unix, windows])

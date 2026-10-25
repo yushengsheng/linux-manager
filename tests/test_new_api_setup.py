@@ -127,6 +127,8 @@ def login_fixture(kind):
 class NewApiSetupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.local_proxy = mock.patch.dict(os.environ, {"NO_PROXY": "localhost,127.0.0.1,::1", "no_proxy": "localhost,127.0.0.1,::1"})
+        cls.local_proxy.start()
         cls.temp = tempfile.TemporaryDirectory(prefix="newapi-tests-")
         cls.root = Path(cls.temp.name).resolve()
         cls.gateway = Gateway(cls.root)
@@ -135,20 +137,30 @@ class NewApiSetupTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.gateway.close()
         cls.temp.cleanup()
+        cls.local_proxy.stop()
     def setUp(self):
         self.case = tempfile.TemporaryDirectory(dir=self.root)
         self.home = Path(self.case.name).resolve()
     def tearDown(self):
         self.case.cleanup()
     def configure(self):
-        return setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        try:
+            return setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        except setup.SetupError as error:
+            context = error.__context__
+            reason = getattr(context, "reason", context)
+            detail = (type(context).__name__, type(reason).__name__, getattr(reason, "verify_code", None),
+                getattr(reason, "verify_message", None), getattr(reason, "errno", None))
+            raise AssertionError("isolated_fixture_failure:" + str(detail)) from None
     def verify_cli(self):
         env = dict(os.environ)
         env.update(CODEX_HOME=str(self.home), SSL_CERT_FILE=str(self.gateway.cert), CODEX_CA_CERTIFICATE=str(self.gateway.cert), OPENAI_API_KEY="fixture-wrong-env-key")
+        env["NO_PROXY"] = env["no_proxy"] = "localhost,127.0.0.1,::1"
         work = self.home / "work"
         work.mkdir(exist_ok=True)
         args = self.command + ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--json", "-C", str(work),
             "-c", 'web_search="disabled"', "-c", 'model_reasoning_effort="low"',
+            "-c", "features.plugins=false",
             "-c", "model_providers.newapi_gateway.request_max_retries=0", "-c", "model_providers.newapi_gateway.stream_max_retries=0",
             "Reply only NEWAPI_OK. Do not use tools."]
         run = subprocess.run(args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
@@ -207,10 +219,10 @@ class NewApiSetupTests(unittest.TestCase):
         result = self.configure()
         backup = self.home / "newapi-backups" / result["backup_id"]
         self.assertEqual((backup / "original").read_text(), original)
-        configured = target.read_text()
-        target.write_text(configured + "\n# edited\n")
+        configured = target.read_bytes()
+        target.write_bytes(configured + b"\n# edited\n")
         with self.assertRaises(setup.SetupError):setup.restore(self.home)
-        target.write_text(configured)
+        target.write_bytes(configured)
         setup.restore(self.home)
         self.assertEqual(target.read_text(), original)
     @unittest.skipIf(os.name == "nt", "Windows ACL case is separate")
@@ -246,6 +258,12 @@ class NewApiSetupTests(unittest.TestCase):
     def test_cancel_does_not_configure(self):
         with mock.patch.object(setup, "config_home", return_value=self.home), mock.patch.object(setup, "discover_codex", return_value=self.command), mock.patch.object(setup, "prompt_terminal", side_effect=setup.Cancelled()), mock.patch.object(sys, "argv", ["setup", "--terminal"]):
             with self.assertRaises(setup.Cancelled):setup.main()
+        self.assertFalse((self.home / "config.toml").exists())
+    def test_old_cli_stops_without_upgrading_or_writing(self):
+        reply = subprocess.CompletedProcess([], 0, stdout=b"codex-cli 0.100.0\n", stderr=b"")
+        with mock.patch.object(subprocess, "run", return_value=reply):
+            with self.assertRaisesRegex(setup.SetupError, "版本过旧"):
+                setup.discover_codex()
         self.assertFalse((self.home / "config.toml").exists())
 
 

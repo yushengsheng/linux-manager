@@ -206,7 +206,7 @@ class Rpc:
     def __init__(self, command, home):
         env = dict(os.environ)
         env["CODEX_HOME"] = str(home)  # Intended Codex data-root setting, scoped to this child.
-        self.process = subprocess.Popen(command + ["app-server", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        self.process = subprocess.Popen(command + ["-c", "features.plugins=false", "app-server", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", cwd=home, env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.timer = threading.Timer(35, self.process.kill)
@@ -239,13 +239,15 @@ class Rpc:
 
     def close(self):
         self.timer.cancel()
-        self.process.terminate()
+        # EOF allows the config-only server to release database/file handles cleanly.
+        if not self.process.stdin.closed:
+            self.process.stdin.close()
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait()
-        self.process.stdin.close()
+            self.process.terminate()
+            try:self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:self.process.kill();self.process.wait()
         self.process.stdout.close()
 
 

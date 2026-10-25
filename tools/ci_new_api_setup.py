@@ -102,6 +102,16 @@ def restricted_windows_child():
 
 def supplemental(setup):
     checks = {}
+    from tools.build_new_api_guide import commands
+    source, entries = commands(check_only=True)
+    if os.name == "nt":
+        shell = shutil.which("powershell.exe")
+        checked = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", "-"], input=entries["Windows"].encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+    else:
+        checked = subprocess.run(["/bin/sh", "-c", entries["macOS" if sys.platform == "darwin" else "Linux"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+    checks["literal_one_line_shell_and_payload_verified"] = checked.returncode == 0 and hashlib.sha256(source).hexdigest().encode() in checked.stdout
+    if not checks["literal_one_line_shell_and_payload_verified"]:
+        raise RuntimeError("literal_command_or_payload_failed")
     with tempfile.TemporaryDirectory(prefix="newapi-discovery-") as tmp:
         home = Path(tmp).resolve()
         real = Path(os.environ["NEWAPI_CODEX_BINARY"])
@@ -173,7 +183,7 @@ def supplemental(setup):
 
 def run():
     from tests.test_new_api_setup import NewApiSetupTests, setup
-    source = (ROOT / "tools/new_api_setup.py").read_bytes()
+    source = (ROOT / "tools/new_api_setup.py").read_text(encoding="utf-8").encode("utf-8")
     report = {"platform": sys.platform, "python": sys.version.split()[0], "codex": VERSION,
         "source_sha256": hashlib.sha256(source).hexdigest(), "auth_state_method": "synthetic records, no real user login",
         "desktop_method": "real CLI copied into representative desktop/user install layout, not full app UI"}
