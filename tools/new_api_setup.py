@@ -24,6 +24,8 @@ import sys
 import tempfile
 import threading
 import tarfile
+import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -198,14 +200,22 @@ def prepare_codex(home):
         if not checked.returncode and b"codex-cli 0.164.0" in checked.stdout:
             return [str(executable)]
     name = "codex-" + target + (".exe" if os.name == "nt" else ".tar.gz")
-    url = "https://github.com/openai/codex/releases/download/rust-v0.164.0/" + name
+    base = os.environ.get("NEWAPI_DOWNLOAD_BASE", "").rstrip("/")
+    try:
+        parsed = urllib.parse.urlsplit(base)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError()
+    except ValueError:
+        raise SetupError("请使用服务器安装入口；尚未提供有效的 HTTPS 组件镜像。") from None
+    url = base + "/codex/0.164.0/" + name
     print("正在自动准备官方 Codex CLI（当前用户目录，无需管理员权限）…", flush=True)
     context = ssl.create_default_context()
     if Path("/etc/ssl/cert.pem").is_file():context.load_verify_locations("/etc/ssl/cert.pem")
     with tempfile.TemporaryDirectory(prefix="codex-download-", dir=directory) as temporary:
         archive = Path(temporary) / name
         digest = hashlib.sha256()
-        with urllib.request.urlopen(url, context=context, timeout=120) as response, archive.open("wb") as output:
+        opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
+        with opener.open(url, timeout=120) as response, archive.open("wb") as output:
             while True:
                 block = response.read(1024 * 1024)
                 if not block:break
@@ -334,9 +344,11 @@ def configure(home, command, url, key, ca_file=None):
     if original is not None:
         private_write(backup / "original", original)
         restrict(target)
-    manifest = {"existed": original is not None, "mode": mode}
+    manifest = {"existed": original is not None, "mode": mode, "created_ns": time.time_ns()}
     private_write(backup / "state.json", json.dumps(manifest).encode())
     written = None
+    attempted = False
+    expected = None
     rpc = Rpc(command, home)
     try:
         before = rpc.call("config/read", {"includeLayers": True})
@@ -350,6 +362,10 @@ def configure(home, command, url, key, ca_file=None):
                   "edits": [{"keyPath": k, "value": v, "mergeStrategy": "replace"} for k, v in edits.items()]}
         if layer:
             params["expectedVersion"] = layer["version"]
+        expected = tomllib.loads((original or b"").decode("utf-8"))
+        expected.update(model=MODEL, model_provider=PROVIDER)
+        expected.setdefault("model_providers", {})[PROVIDER] = provider
+        attempted = True
         result = rpc.call("config/batchWrite", params)
         written = target.read_bytes()
         restrict(target)
@@ -361,14 +377,29 @@ def configure(home, command, url, key, ca_file=None):
             raise SetupError("写入后配置未生效，已停止。")
         manifest["installed_sha256"] = hashlib.sha256(written).hexdigest()
         private_write(backup / "state.json", json.dumps(manifest).encode())
-    except Exception:
-        if written is not None and target.read_bytes() == written:
+    except BaseException:
+        # Stop the writer before inspecting a commit whose RPC reply may be lost.
+        rpc.close()
+        current = target.read_bytes() if target.exists() and not target.is_symlink() else None
+        if attempted and written is None and current is not None and current != original:
+            try:
+                if tomllib.loads(current.decode("utf-8")) == expected:
+                    written = current
+            except (ValueError, UnicodeError):
+                pass
+        if written is not None:
+            manifest["installed_sha256"] = hashlib.sha256(written).hexdigest()
+            private_write(backup / "state.json", json.dumps(manifest).encode())
+        if (written is not None and not target.is_symlink() and
+                (target.read_bytes() if target.exists() else None) == written):
             if original is None:
                 target.unlink()
             else:
                 private_write(target, original)
                 if os.name != "nt":
                     target.chmod(mode)
+            manifest["restored"] = True
+            private_write(backup / "state.json", json.dumps(manifest).encode())
         raise
     finally:
         rpc.close()
@@ -380,10 +411,13 @@ def restore(home):
     parent = home / "newapi-backups"
     if parent.is_symlink():
         raise SetupError("备份目录无效。")
-    for directory in sorted(parent.glob("????????-??????-????????"), reverse=True):
+    backups = []
+    for directory in parent.glob("????????-??????-????????"):
         if directory.is_symlink():
             continue
         state = json.loads((directory / "state.json").read_bytes())
+        backups.append((state.get("created_ns", directory.stat().st_mtime_ns), directory.name, directory, state))
+    for _, _, directory, state in sorted(backups, key=lambda row: row[:2], reverse=True):
         if state.get("restored") or not state.get("installed_sha256"):
             continue
         current = target.read_bytes() if target.exists() else b""
@@ -405,6 +439,9 @@ def restore(home):
 def prompt_mac():
     values = []
     for title, secret in [("请输入 New API HTTPS 地址（保留端口，可带 /v1）", False), ("请输入个人 API 密钥", True)]:
+        if not secret and os.environ.get("NEWAPI_SETUP_ORIGIN"):
+            values.append(os.environ["NEWAPI_SETUP_ORIGIN"])
+            continue
         script = "text returned of (display dialog " + json.dumps(title, ensure_ascii=False) + " default answer \"\" with title \"Codex 连接 New API\"" + (" with hidden answer" if secret else "") + ")"
         result = subprocess.run(["osascript", "-e", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
         if result.returncode:
@@ -425,6 +462,7 @@ $f.Text='Codex - New API';$f.Width=530;$f.Height=235;$f.StartPosition='CenterScr
 $f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
 $l1=New-Object Windows.Forms.Label;$l1.Text='New API HTTPS URL (keep port, optional /v1)';$l1.SetBounds(15,15,480,22)
 $u=New-Object Windows.Forms.TextBox;$u.SetBounds(15,40,480,25)
+$u.Text=$env:NEWAPI_SETUP_ORIGIN
 $l2=New-Object Windows.Forms.Label;$l2.Text='Personal API key';$l2.SetBounds(15,76,480,22)
 $k=New-Object Windows.Forms.TextBox;$k.SetBounds(15,100,480,25);$k.UseSystemPasswordChar=$true
 $ok=New-Object Windows.Forms.Button;$ok.Text='OK';$ok.SetBounds(310,145,85,30);$ok.DialogResult='OK'
@@ -462,6 +500,8 @@ def prompt_linux():
     for index, (label, secret) in enumerate([("New API HTTPS URL (keep port, optional /v1)", False), ("Personal API key", True)]):
         tk.Label(root, text=label).grid(row=index * 2, column=0, padx=16, pady=(12, 0), sticky="w")
         entry = tk.Entry(root, width=54, show="*" if secret else "")
+        if not secret and os.environ.get("NEWAPI_SETUP_ORIGIN"):
+            entry.insert(0, os.environ["NEWAPI_SETUP_ORIGIN"])
         entry.grid(row=index * 2 + 1, column=0, padx=16, pady=4)
         values.append(entry)
     result = []
@@ -479,7 +519,8 @@ def prompt_linux():
 def prompt_terminal():
     if not sys.stdin.isatty():
         raise SetupError("没有可交互终端；请直接粘贴教程的一行命令，不要把密钥放入命令参数。")
-    return input("New API HTTPS 地址： ").strip(), getpass.getpass("个人 API 密钥（不回显）： ").strip()
+    origin = os.environ.get("NEWAPI_SETUP_ORIGIN") or input("New API HTTPS 地址： ").strip()
+    return origin, getpass.getpass("个人 API 密钥（不回显）： ").strip()
 
 
 def main():

@@ -28,7 +28,7 @@ KEY = "fixture-only-not-a-real-api-key"
 
 
 class Gateway:
-    def __init__(self, root):
+    def __init__(self, root, mirror=None):
         executable = shutil.which("openssl")
         if not executable and os.name == "nt":
             possible = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/usr/bin/openssl.exe"
@@ -57,6 +57,7 @@ class Gateway:
         if os.name != "nt":
             key.chmod(0o600)
         self.requests = []
+        self.downloads = []
         self.reject = False
         self.missing_model = False
         gateway = self
@@ -75,6 +76,20 @@ class Gateway:
             def allowed(self):
                 return not gateway.reject and self.headers.get("Authorization") == "Bearer " + KEY
             def do_GET(self):
+                if mirror is not None and self.path.startswith('/client-setup/'):
+                    import urllib.parse
+                    relative = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path[len('/client-setup/'):])
+                    path = (mirror / relative).resolve()
+                    if not path.is_relative_to(mirror.resolve()) or not path.is_file():
+                        return self.reply({'error': 'missing_fixture_asset'}, 404)
+                    gateway.downloads.append(relative)
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(path.stat().st_size))
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    with path.open('rb') as stream:
+                        shutil.copyfileobj(stream, self.wfile, 1024 * 1024)
+                    return
                 if not self.allowed():
                     return self.reply({"error": {"message": "fixture rejected"}}, 401)
                 models = ["gemini-3.8-flash-high"] if gateway.missing_model else ["gpt-6.1-sol", "gemini-3.8-flash-high", "gpt-image-2"]
@@ -283,6 +298,133 @@ class NewApiSetupTests(unittest.TestCase):
         with mock.patch.object(setup, "Rpc", PolicyRpc):
             with self.assertRaisesRegex(setup.SetupError, "管理策略"):
                 setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_lost_write_reply_rolls_back_existing_and_fresh_config(self):
+        real_rpc = setup.Rpc
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                home = self.home / str(existing)
+                home.mkdir()
+                target = home / 'config.toml'
+                original = b'# keep comment\nmodel="previous"\n' if existing else None
+                if original is not None:
+                    target.write_bytes(original)
+                    if os.name != 'nt':
+                        target.chmod(0o640)
+                class LostReplyRpc(real_rpc):
+                    def call(self, method, params):
+                        result = super().call(method, params)
+                        if method == 'config/batchWrite':
+                            raise setup.SetupError('simulated_reply_lost_after_commit')
+                        return result
+                with mock.patch.object(setup, 'Rpc', LostReplyRpc):
+                    with self.assertRaisesRegex(setup.SetupError, 'simulated_reply_lost'):
+                        setup.configure(home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+                self.assertEqual(target.read_bytes() if target.exists() else None, original)
+                if original is not None and os.name != 'nt':
+                    self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
+                states = list((home / 'newapi-backups').glob('*/state.json'))
+                self.assertEqual(len(states), 1)
+                self.assertTrue(json.loads(states[0].read_bytes())['restored'])
+
+    def test_lost_reply_does_not_hide_previous_successful_backup(self):
+        target = self.home / 'config.toml'
+        original = b'model="original"\n'
+        target.write_bytes(original)
+        self.configure()
+        configured = target.read_bytes()
+        real_rpc = setup.Rpc
+        class LostReplyRpc(real_rpc):
+            def call(self, method, params):
+                result = super().call(method, params)
+                if method == 'config/batchWrite':
+                    raise setup.SetupError('simulated_reply_lost_after_commit')
+                return result
+        with mock.patch.object(setup, 'Rpc', LostReplyRpc):
+            with self.assertRaises(setup.SetupError):
+                setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        self.assertEqual(target.read_bytes(), configured)
+        setup.restore(self.home)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_failed_rollback_after_lost_reply_leaves_restorable_backup(self):
+        target = self.home / 'config.toml'
+        original = b'model="previous"\n'
+        target.write_bytes(original)
+        real_rpc, real_write = setup.Rpc, setup.private_write
+        class LostReplyRpc(real_rpc):
+            def call(self, method, params):
+                result = super().call(method, params)
+                if method == 'config/batchWrite':
+                    raise setup.SetupError('simulated_reply_lost_after_commit')
+                return result
+        def fail_rollback(path, content):
+            if path == target:
+                raise OSError('simulated_rollback_write_failure')
+            return real_write(path, content)
+        with mock.patch.object(setup, 'Rpc', LostReplyRpc), mock.patch.object(setup, 'private_write', side_effect=fail_rollback):
+            with self.assertRaises(OSError):
+                setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        self.assertNotEqual(target.read_bytes(), original)
+        setup.restore(self.home)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_lost_reply_does_not_overwrite_concurrent_config_changes(self):
+        target = self.home / 'config.toml'
+        real_rpc = setup.Rpc
+        edited = None
+        class ConcurrentEditRpc(real_rpc):
+            def call(self, method, params):
+                nonlocal edited
+                result = super().call(method, params)
+                if method == 'config/batchWrite':
+                    edited = 'model_reasoning_effort="low"\n' + target.read_text()
+                    target.write_text(edited)
+                    raise setup.SetupError('simulated_reply_lost_after_external_edit')
+                return result
+        with mock.patch.object(setup, 'Rpc', ConcurrentEditRpc):
+            with self.assertRaises(setup.SetupError):
+                setup.configure(self.home, self.command, self.gateway.base, KEY, str(self.gateway.cert))
+        self.assertEqual(target.read_text(), edited)
+
+    def test_same_second_backups_restore_by_creation_time_including_legacy_records(self):
+        target = self.home / 'config.toml'
+        original = b'model="original"\n'
+        target.write_bytes(original)
+        with mock.patch.object(setup.os, 'urandom', side_effect=[b'\xff' * 4, b'\x00' * 4]):
+            first = self.configure()
+            first_config = target.read_bytes()
+            second = self.configure()
+        parent = self.home / 'newapi-backups'
+        first_dir, second_dir = parent / first['backup_id'], parent / second['backup_id']
+        first_dir.rename(parent / '20261025-120000-ffffffff')
+        second_dir.rename(parent / '20261025-120000-00000000')
+        for index, suffix in enumerate(('ffffffff', '00000000'), 1):
+            directory = parent / ('20261025-120000-' + suffix)
+            state = json.loads((directory / 'state.json').read_bytes())
+            state.pop('created_ns')
+            setup.private_write(directory / 'state.json', json.dumps(state).encode())
+            timestamp = 1_700_000_000_000_000_000 + index * 1_000_000_000
+            os.utime(directory, ns=(timestamp, timestamp))
+        setup.restore(self.home)
+        self.assertEqual(target.read_bytes(), first_config)
+        setup.restore(self.home)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_new_backup_order_does_not_depend_on_random_suffix_or_directory_mtime(self):
+        target = self.home / 'config.toml'
+        original = b'model="original"\n'
+        target.write_bytes(original)
+        first = self.configure()
+        first_config = target.read_bytes()
+        self.configure()
+        directory = self.home / 'newapi-backups' / first['backup_id']
+        future = 4_000_000_000_000_000_000
+        os.utime(directory, ns=(future, future))
+        setup.restore(self.home)
+        self.assertEqual(target.read_bytes(), first_config)
+        setup.restore(self.home)
         self.assertEqual(target.read_bytes(), original)
 
 

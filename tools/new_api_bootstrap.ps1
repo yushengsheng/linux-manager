@@ -5,6 +5,11 @@ $ProgressPreference='SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 $work=$null
 try {
+  $origin=$env:NEWAPI_SETUP_ORIGIN.TrimEnd('/') -replace '/v1$',''
+  $parsed=[Uri]$origin
+  if($parsed.Scheme -ne 'https' -or !$parsed.Host -or $parsed.UserInfo -or $parsed.Query -or $parsed.Fragment -or $parsed.AbsolutePath -ne '/'){throw '请先输入有效的 New API HTTPS 根地址。'}
+  $env:NEWAPI_SETUP_ORIGIN=$origin
+  $base=$origin+'/client-setup'
   $root=if($env:CODEX_HOME){$env:CODEX_HOME}else{Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'}
   $runtime=Join-Path $root 'newapi-runtime'
   New-Item -ItemType Directory -Force -Path $runtime | Out-Null
@@ -19,27 +24,32 @@ try {
     default {throw '当前处理器不在已支持的 64 位平台中。'}
   }
   $script=Join-Path $work 'setup.py'
-  Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/yushengsheng/linux-manager/17271fb01259c4c13fb1aba346a63cfce6a99ae1/tools/new_api_setup.py' -OutFile $script
-  if((Get-FileHash -Algorithm SHA256 -LiteralPath $script).Hash.ToLowerInvariant() -ne 'a2ef8212851b29eead645a878248989e6562cd21323e88816eb60931ac930d54'){throw '配置程序校验失败，未执行。'}
+  $setupDigest='__SETUP_SHA256__'
+  Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "$base/releases/$setupDigest/new_api_setup.py" -OutFile $script
+  if((Get-FileHash -Algorithm SHA256 -LiteralPath $script).Hash.ToLowerInvariant() -ne $setupDigest){throw '配置程序校验失败，未执行。'}
   $archive=Join-Path $work 'uv.zip'
-  Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-$target.zip" -OutFile $archive
+  Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "$base/uv/0.13.5/uv-$target.zip" -OutFile $archive
   if((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() -ne $digest){throw '运行组件校验失败，未执行。'}
   Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $work 'uv')
   $uv=(Get-ChildItem -Path (Join-Path $work 'uv') -Filter uv.exe -Recurse | Select-Object -First 1).FullName
   if(!$uv){throw '官方运行组件结构异常。'}
-  $previousCache=$env:UV_CACHE_DIR;$previousPython=$env:UV_PYTHON_INSTALL_DIR;$previousEncoding=$env:PYTHONIOENCODING;$previousUtf8=$env:PYTHONUTF8
+  $names=@('UV_CACHE_DIR','UV_PYTHON_INSTALL_DIR','UV_PYTHON_DOWNLOADS_JSON_URL','PYTHONIOENCODING','PYTHONUTF8','NEWAPI_DOWNLOAD_BASE')
+  $previous=@{}
+  foreach($name in $names){$previous[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
   $env:UV_CACHE_DIR=Join-Path $runtime 'cache';$env:UV_PYTHON_INSTALL_DIR=Join-Path $runtime 'python'
-  $env:PYTHONIOENCODING='utf-8';$env:PYTHONUTF8='1'
+  $env:UV_PYTHON_DOWNLOADS_JSON_URL=$null;$env:PYTHONIOENCODING='utf-8';$env:PYTHONUTF8='1';$env:NEWAPI_DOWNLOAD_BASE=$base
   try {
-    $arguments=@('run','--no-project','--no-config','--managed-python','--python','3.13',$script,'--auto-prepare')
+    & $uv python install 3.13.17 --mirror "$base/python" --no-bin --no-registry --no-config --system-certs *> (Join-Path $work 'python-log')
+    if($LASTEXITCODE -ne 0){throw '无法从服务器准备 Python；未修改连接配置。'}
+    $arguments=@('run','--offline','--no-project','--no-config','--managed-python','--python','3.13.17',$script,'--auto-prepare')
     if($PrepareOnly){$arguments+='--prepare-only'}
     if($Restore){$arguments+='--restore'}
     if($Terminal){$arguments+='--terminal'}
     & $uv @arguments
     if($LASTEXITCODE -ne 0){throw '自动配置未完成，请查看上方提示。'}
-  }finally{$env:UV_CACHE_DIR=$previousCache;$env:UV_PYTHON_INSTALL_DIR=$previousPython;$env:PYTHONIOENCODING=$previousEncoding;$env:PYTHONUTF8=$previousUtf8}
+  }finally{foreach($name in $names){[Environment]::SetEnvironmentVariable($name,$previous[$name],'Process')}}
 }catch{
-  [Console]::Error.WriteLine('未完成：'+$_.Exception.Message+' 不需要预先切换管理员或关闭执行策略。')
+  [Console]::Error.WriteLine('自动配置未完成；请检查服务器网络、HTTPS 证书、系统权限或上方提示。无需关闭执行策略或 UAC。')
   exit 1
 }finally{
   if($work -and (Test-Path -LiteralPath $work)){Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue}

@@ -7,20 +7,51 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import ssl
+import urllib.request
 
 ROOT = Path(__file__).parents[1]
 
 
 def run():
+    from tests.test_new_api_setup import Gateway
+    from tools.build_new_api_mirror import build
+    mirror = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-mirror'
+    build(mirror, current_platform=True)
+    gateway = Gateway(Path(tempfile.mkdtemp(prefix='mirror-tls-')), mirror=mirror)
+    try:
+        return run_client(mirror, gateway)
+    finally:
+        gateway.close()
+
+
+def run_client(mirror, gateway):
     home = Path(os.environ["RUNNER_TEMP"]) / "newapi-bootstrap-home"
     home.mkdir(exist_ok=True)
     env = dict(os.environ)
     env["CODEX_HOME"] = str(home)
     env.pop("NEWAPI_CODEX_BINARY", None)
+    env.update(NEWAPI_SETUP_ORIGIN=gateway.base.removesuffix('/v1'),
+               SSL_CERT_FILE=str(gateway.cert), CURL_CA_BUNDLE=str(gateway.cert),
+               UV_SYSTEM_CERTS='true', NO_PROXY='localhost,127.0.0.1,::1', no_proxy='localhost,127.0.0.1,::1')
+    # Any accidental external download must fail, even on a GitHub-connected runner.
+    env.update(HTTPS_PROXY='http://localhost:9', HTTP_PROXY='http://localhost:9', ALL_PROXY='http://localhost:9',
+               https_proxy='http://localhost:9', http_proxy='http://localhost:9', all_proxy='http://localhost:9')
+    context = ssl.create_default_context(cafile=str(gateway.cert))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
+    with opener.open(env['NEWAPI_SETUP_ORIGIN'] + '/client-setup/install.' + ('ps1' if os.name == 'nt' else 'sh')) as response:
+        downloaded = response.read(128 * 1024)
+    if downloaded != (mirror / ('install.ps1' if os.name == 'nt' else 'install.sh')).read_bytes():
+        raise RuntimeError('bootstrap_download_mismatch')
+    trust_added = False
     if os.name == "nt":
         shell = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
         env["PATH"] = os.pathsep.join([str(Path(shell).parent), str(Path(os.environ["SystemRoot"]) / "System32"), os.environ["SystemRoot"]])
-        script = (ROOT / "tools/new_api_bootstrap.ps1").read_text(encoding="utf-8")
+        trusted = subprocess.run(['certutil', '-user', '-addstore', 'Root', str(gateway.cert)], capture_output=True)
+        if trusted.returncode:
+            raise RuntimeError('fixture_certificate_trust_failed')
+        trust_added = True
+        script = downloaded.decode('utf-8')
         source = base64.b64encode(script.encode("utf-8")).decode("ascii")
         invoke = "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + source + "')))) -PrepareOnly"
         stdin = None
@@ -28,8 +59,16 @@ def run():
     else:
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         stdin = None
-        args = ["/bin/sh", str(ROOT / "tools/new_api_bootstrap.sh"), "--prepare-only"]
-    result = subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=420)
+        script = Path(os.environ['RUNNER_TEMP']) / 'fixture-install.sh'
+        script.write_bytes(downloaded)
+        args = ["/bin/sh", str(script), "--prepare-only"]
+    try:
+        result = subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=420)
+    finally:
+        if trust_added:
+            import hashlib as _hashlib
+            der = ssl.PEM_cert_to_DER_cert(gateway.cert.read_text())
+            subprocess.run(['certutil', '-user', '-delstore', 'Root', _hashlib.sha1(der).hexdigest()], capture_output=True)
     # No keys or user data enter this process; still avoid dumping runtime paths.
     if result.returncode:
         error = result.stderr.decode("utf-8", "replace")
@@ -51,6 +90,8 @@ def run():
     summary = {"platform": sys.platform, "passed": True, "codex_on_path_not_required": True,
         "system_python_not_used": True, "managed_python_prepared": True, "official_cli_sha_verified": True,
         "config_unchanged": True, "temporary_downloads_removed": True,
+         "github_access_blocked_for_client": True, "server_only_downloads": True,
+         "downloaded_components": gateway.downloads,
         "source_sha256": hashlib.sha256((ROOT / "tools/new_api_setup.py").read_text(encoding="utf-8").encode()).hexdigest()}
     if os.name == "nt":
         import ctypes
