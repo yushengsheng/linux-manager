@@ -1,6 +1,7 @@
 """Render self-contained one-line commands from the exact tested setup source."""
 import base64
 import hashlib
+import gzip
 import json
 from pathlib import Path
 import zlib
@@ -166,12 +167,25 @@ def server_commands(restore=False, prepare_only=False):
     import shlex
     loader = """set -eu; origin=${NEWAPI_SETUP_ORIGIN%/}; origin=${origin%/v1}; case "$origin" in https://*) ;; *) exit 1 ;; esac; authority=${origin#https://}; case "$authority" in *'@'*|*'?'*|*'#'*|*' '*|*/*) printf '%s\\n' '请使用 HTTPS 根地址，勿带账号或后台路径。' >&2; exit 1 ;; esac; export NEWAPI_SETUP_ORIGIN="$origin"; file=$(mktemp); trap 'rm -f "$file"' EXIT HUP INT TERM; curl --proto '=https' --tlsv1.2 -fsS "$origin/client-setup/install.sh" -o "$file"; sh "$file" "$@" """
     unix = "printf 'New API HTTPS 地址： '; IFS= read -r NEWAPI_SETUP_ORIGIN; export NEWAPI_SETUP_ORIGIN; sh -c " + shlex.quote(loader) + ' newapi' + (' --restore' if restore else ' --prepare-only' if prepare_only else '')
-    windows = "& { $env:NEWAPI_SETUP_ORIGIN=(Read-Host 'New API HTTPS 地址').TrimEnd('/') -replace '/v1$',''; try { $u=[Uri]$env:NEWAPI_SETUP_ORIGIN; if($u.Scheme -ne 'https' -or !$u.Host -or $u.UserInfo -or $u.Query -or $u.Fragment -or $u.AbsolutePath -ne '/'){throw 'invalid_address'}; & ([scriptblock]::Create((Invoke-RestMethod -MaximumRedirection 0 -Uri ($env:NEWAPI_SETUP_ORIGIN+'/client-setup/install.ps1'))))" + (' -Restore' if restore else ' -PrepareOnly' if prepare_only else '') + "; if($LASTEXITCODE -ne 0){throw 'setup_failed'} } catch { Write-Error '服务器配置命令未完成，请检查地址、网络或上方提示。' } }"
+    windows = "& { $env:NEWAPI_SETUP_ORIGIN=(Read-Host 'New API HTTPS 地址').TrimEnd('/') -replace '/v1$',''; try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $u=[Uri]$env:NEWAPI_SETUP_ORIGIN; if($u.Scheme -ne 'https' -or !$u.Host -or $u.UserInfo -or $u.Query -or $u.Fragment -or $u.AbsolutePath -ne '/'){throw 'invalid_address'}; Write-Host '正在连接服务器安装入口…'; & ([scriptblock]::Create((Invoke-RestMethod -MaximumRedirection 0 -TimeoutSec 30 -Uri ($env:NEWAPI_SETUP_ORIGIN+'/client-setup/install.ps1'))))" + (' -Restore' if restore else ' -PrepareOnly' if prepare_only else '') + "; if($LASTEXITCODE -ne 0){throw 'setup_failed'} } catch { Write-Error '服务器配置命令未完成，请检查地址、网络或上方提示。' } }"
     return {"macOS": unix, "Linux": unix, "Windows": windows}
+
+
+def windows_native_command(restore=False, prepare_only=False):
+    """Embed the native source: no bootstrap server or extra runtime is needed."""
+    source = (ROOT / 'tools/new_api_bootstrap.ps1').read_text(encoding='utf-8').encode('utf-8')
+    payload = base64.b64encode(gzip.compress(source, mtime=0)).decode('ascii')
+    flags = ' -Restore' if restore else ' -PrepareOnly' if prepare_only else ''
+    return ("& { $m=[IO.MemoryStream]::new([Convert]::FromBase64String('" + payload + "')); "
+            "$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress); "
+            "$r=[IO.StreamReader]::new($z,[Text.Encoding]::UTF8); try { & ([scriptblock]::Create($r.ReadToEnd()))" +
+            flags + " } finally { $r.Dispose(); $z.Dispose(); $m.Dispose() } }")
 
 
 def build_short(report=None):
     entries, restores = server_commands(), server_commands(restore=True)
+    entries['Windows'] = windows_native_command()
+    restores['Windows'] = windows_native_command(restore=True)
     text = f'''# New API 配置教程
 
 复制自己系统的一行命令，先输入 New API 的 HTTPS 地址，再输入个人 API 密钥；显示“配置完成”后退出并重新打开 Codex，新建会话。
@@ -194,22 +208,79 @@ def build_short(report=None):
 {entries["Windows"]}
 ```
 
-密钥输入框隐藏内容。不需要预装 Python、Node、npm，不需要管理员窗口、关闭 UAC 或绕过执行策略。Windows 7、32 位系统和禁止用户应用的企业策略不在支持范围。
+这条 Windows 命令内置了完整配置源码，只用系统自带的 PowerShell/.NET 和已经安装的 Codex，不下载 Python、uv、Node、npm 或新的 Codex，也不依赖服务器的 `/client-setup/install.ps1`。压缩编码用于在一行中携带固定源码；可审阅同目录的 `tools/new_api_bootstrap.ps1`。配置成功后正常退出并重开桌面版，新建会话。
+
+输入框中填自己的地址和个人 API 密钥；地址支持 HTTPS 根地址、`/v1` 或 `/keys`，端口会保留。密钥输入隐藏，不进入命令历史。脚本按密钥读取 `/v1/models`，排除图片、语音、嵌入和内部审核模型，写入 Codex 模型菜单，并让使用者选择默认模型（优先 `gpt-6.1-sol`）。写入前发送一次最多 32 个输出 Token 的短 Responses 请求，验证默认模型的接口支持；这会产生一次正常 API 调用，不重复重试推理请求。
+
+适配新安装和已有配置、未登录/ChatGPT 登录/API 登录，自动查找 PATH、官方用户安装目录和商店安装目录中的内置 CLI；无需把 CLI 手动加入 PATH。使用 Codex 自身的配置接口合并模型、服务商和模型目录，保留其他设置、注释及 `auth.json`。先私有备份，在隔离目录预生成并核对改动，再按版本提交；响应丢失时仅撤回能精确确认是本次写入的内容。备份和模型目录保存在当前用户的 `newapi-backups` 中，不要随意删除正在使用的备份目录。
+
+支持带可用内置 CLI、配置接口版本至少 0.164.0 的原生 Windows 桌面版。旧版本、无内置 CLI 的非官方封装、损坏的 TOML、旧式 `profile` 配置或企业策略阻止修改时会明确停止，保留原文件；不会为了兼容而覆盖整份配置或自动升级客户端。Windows 7、32 位系统、WSL 和禁止用户运行应用的企业策略不在此方式的支持范围。PowerShell 5.1、ISE 和 Windows Terminal 的 PowerShell 标签页可用，无需管理员窗口或修改执行策略。
+
+模型名称和权限来自每次运行时的 New API，不写死某个后台或某个人的密钥。完整能力只复用本地目录中同名模型的已知元数据；未知别名采用保守设置，不编造上下文长度或思考强度。模型出现在菜单中不等于已验证每个模型的工具调用能力，默认模型之外需按实际使用验证。
 
 ## 下载与隐私
 
-- 安装入口、配置源码、uv 0.13.5、Python 3.13.17 和必要时的 Codex CLI 0.164.0 全部从输入的 Linux 服务器下载。客户端安装过程不访问 GitHub、PyPI 或其他运行时下载站；服务器管理员准备镜像时才需要访问官方源。
-- 支持 macOS / Windows / Linux 的 x86_64 与 ARM64；Linux 同时准备 glibc 与 musl Python。官方组件保持原始文件和摘要，下载后核验 SHA-256。配置源码以摘要固定版本，缺失或校验失败即停止，不回退到 GitHub。
+- Windows 使用上方内置源码的本地配置方式，配置过程仅访问填写的 New API 模型与 Responses 接口。API 密钥不跟随 HTTP 重定向，不关闭 HTTPS 证书验证。
+- macOS/Linux 仍使用服务器准备方式：安装入口、配置源码、uv 0.13.5、Python 3.13.17 和必要时的 Codex CLI 0.164.0 全部从输入的 Linux 服务器下载，不访问 GitHub、PyPI 等外部下载站。
+- macOS/Linux 的官方组件保持原始文件和摘要，下载后核验 SHA-256；源码以摘要固定版本，缺失或校验失败即停止，不回退到 GitHub。支持 x86_64 与 ARM64，Linux 同时准备 glibc 与 musl Python。
 - 密钥在本机隐藏输入，经 HTTPS 验证；保存在本机受限配置中，macOS/Linux 权限 600，Windows 为当前用户专用 ACL。不把密钥写入命令参数、不读取钥匙串、不上传本机配置。
 - 保留原登录记录、其他服务商、插件和思考强度。默认模型仍为 `gpt-6.1-sol`；已安装的桌面程序不会被覆盖或重启。
-- 组件存放在当前用户 Codex 目录的 `newapi-runtime` 中；使用现有 CLI 或准备私有副本。首次需要下载，之后复用缓存。
+- macOS/Linux 的组件保存在 `newapi-runtime`；Windows 不创建或依赖该运行环境目录。
 - 新旧配置 × 无登录、ChatGPT 登录、API 登录均使用合成记录测试。写入响应丢失时先停止写入进程，再确认本次内容并撤回；撤回失败保留可恢复备份，其他程序的配置变化不被覆盖。连续备份按创建时间恢复，兼容旧备份。
 
 证书无效、网络不通、密钥无效、模型无权限或目录不可写时会明确失败。只有这台服务器可达仍不等于上游推理永远可用；配置完成后可用一句简单问题，并在 New API 使用日志确认模型、Token 和费用。
 
 请在使用 Codex 的同一台电脑、同一用户下配置。Windows 与 WSL、远程 SSH 与本机桌面相互独立。设置过 `CODEX_HOME` 时，终端和桌面必须使用同一目录。
 
+## 查看当前使用的接口
+
+打开当前用户的 `config.toml`：
+
+| 系统 | 默认位置 |
+| --- | --- |
+| Windows | `%USERPROFILE%\\.codex\\config.toml`，可粘贴到资源管理器地址栏后用文本编辑器打开 |
+| macOS / Linux | `~/.codex/config.toml` |
+
+设置过 `CODEX_HOME` 时，打开该目录里的 `config.toml`。查看文件顶部、所有 `[表名]` 之前的 `model_provider`：
+
+| 配置值 | 默认接口 |
+| --- | --- |
+| `newapi_gateway` | 本教程配置的 New API |
+| `linux-manager-cliproxyapi` | 本项目原先配置的 CLIProxyAPI |
+
+文件中同时存在两段 `[model_providers.…]`，表示保留了两套服务商配置；默认使用哪一套由顶部的 `model_provider` 决定。已打开的会话可能仍保留旧连接，修改后需重开程序并新建会话。若使用独立 profile 或受企业策略管理，还需核对对应的覆盖设置。
+
+## 切回旧 CLIProxyAPI，再切回 New API
+
+New API 配置会保留其他服务商及原登录记录。旧配置能否继续调用，取决于旧服务仍在运行、原密钥仍有效，以及所选模型仍有权限；New API 的个人密钥不自动替代旧接口的密钥。
+
+1. 保存当前工作，正常退出 Codex，用文本编辑器打开上文的 `config.toml`。
+2. 确认文件中仍有 `[model_providers.linux-manager-cliproxyapi]`，并保留它原来的地址、认证设置和所引用的密钥文件。如果原来使用其他服务商名称，以旧配置的实际名称为准；没有旧服务商配置时，先从私有备份核对并补回，不能只填一个不存在的名称。
+3. 将文件顶部已有的这一行：
+
+   ```toml
+   model_provider = "newapi_gateway"
+   ```
+
+   改为：
+
+   ```toml
+   model_provider = "linux-manager-cliproxyapi"
+   ```
+
+4. 保存文件，重新打开 Codex，**新建会话**后使用旧接口。不要在文件末尾或某个 `[表名]` 下再添加同名设置。
+
+以后需要再切回 New API，只需将顶部这行改回 `model_provider = "newapi_gateway"`，保存后重开 Codex 并新建会话。两套 `[model_providers.…]` 和各自的密钥都保留，无需反复运行配置命令或重新登录。
+
+两边都支持当前模型时，`model` 无需更改；例如两边都支持 `gpt-6.1-sol`，就可继续使用。若模型权限不同，改为所选接口实际支持的模型。`model_catalog_json` 指定模型菜单文件；若菜单仍显示另一套接口的模型，可对照配置前备份，把它改为相应接口原来的目录文件路径。切回 New API 时使用 New API 对应的路径，并保留该路径引用的 `newapi-backups` 目录。
+
+## 切换后如何确认
+
+先核对 `model_provider`，再用新会话发送一句简短问题，并查看所选服务的请求日志。模型接口 `/v1/models` 返回成功，只说明地址、密钥及模型列表可读取；实际推理、工具调用和费用以真实请求为准。
+
 ## 恢复原配置
+
+如果只想换默认接口，使用上一节的手工切换即可。下面的恢复命令会还原最近一次尚未恢复的配置前文件，撤销该次配置对默认模型、服务商和模型目录等设置的改动；原先没有配置文件时会移除本次创建的文件。连续配置过多次时，按最近一次到最早一次逐次恢复。恢复不修改原有 `auth.json`。
 
 macOS / Linux：
 
@@ -223,7 +294,9 @@ Windows PowerShell：
 {restores["Windows"]}
 ```
 
-恢复只需输入服务器地址，不用再次输入密钥。后续配置被修改时会停止恢复，避免覆盖其他设置。
+Windows 恢复完全在本地执行，不用输入服务器地址或密钥，也不联网。macOS/Linux 恢复仍需服务器地址下载入口，不用再次输入密钥。恢复后重开 Codex 并新建会话。
+
+如果已经手工切换接口、调整设置，或被其他程序修改过配置，自动恢复会停止，避免覆盖后续改动。这时若只想换接口，继续使用手工切换；若需完整恢复，对照私有备份中的 `original` 文件逐项合并需要的设置，不要强行覆盖当前配置或修改备份校验记录。备份可能含密钥，留在本机，不上传或公开粘贴。
 
 ## 验证记录
 

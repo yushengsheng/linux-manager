@@ -13,6 +13,7 @@ on:
       - 'tools/ci_new_api_bootstrap.py'
       - 'tests/test_new_api_setup.py'
       - 'tests/test_new_api_mirror.py'
+      - 'tests/test_new_api_windows.py'
       - 'scripts/new_api_auto_update.py'
       - 'scripts/install_new_api_client_mirror.py'
       - 'tests/test_new_api_auto_update.py'
@@ -35,10 +36,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: One-click bootstrap with no Python or Codex dependency on PATH
+      - name: Verify native Windows setup or server runtime bootstrap
         shell: bash
         run: python tools/ci_new_api_setup.py --bootstrap
-      - name: Verify bootstrap, login matrix, permissions, and real Responses client
+      - name: Verify platform client, login matrix, permissions, and real Responses calls
         shell: bash
         run: |
           if [ '${{ runner.os }}' = 'Linux' ] && command -v xvfb-run >/dev/null; then

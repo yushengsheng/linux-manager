@@ -70,7 +70,7 @@ osacompile -o 启动本地最新版.app scripts/启动本地最新版.applescrip
 
 ## New API 配置与自动更新
 
-- [客户端配置教程](new%20api%20配置教程.md)：从 Linux 服务器获取安装脚本和运行组件，客户端无需访问 GitHub。
+- [客户端配置教程](new%20api%20配置教程.md)：Windows 使用内置 PowerShell 源码和已安装的 Codex，无需下载额外运行环境；macOS/Linux 从服务器获取组件。包含当前接口检查、New API / 旧 CLIProxyAPI 切换及原配置恢复。
 - [服务器自动更新说明](new%20api%20自动更新说明.md)：官方版本检查、数据保护、失败恢复和管理命令。
 
 ## 测试、源码更新与发版

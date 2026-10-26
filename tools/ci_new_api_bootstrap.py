@@ -48,6 +48,12 @@ def run_client(mirror, gateway):
     if downloaded != (mirror / ('install.ps1' if os.name == 'nt' else 'install.sh')).read_bytes():
         raise RuntimeError('bootstrap_download_mismatch')
     if os.name == "nt":
+        # Provision the test author's official CLI before running the client.
+        # Native Windows clients now reuse an installation and download no runtime.
+        executable = mirror / 'codex/0.164.0/codex-x86_64-pc-windows-msvc.exe'
+        env['NEWAPI_CODEX_BINARY'] = str(executable)
+        for key in list(env):
+            if key.upper() == 'PSMODULEPATH':env.pop(key)
         shell = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe")
         env["PATH"] = os.pathsep.join([str(Path(shell).parent), str(Path(os.environ["SystemRoot"]) / "System32"), os.environ["SystemRoot"]])
         print(json.dumps({'bootstrap_stage': 'trust_fixture_certificate'}), flush=True)
@@ -83,19 +89,25 @@ def run_client(mirror, gateway):
         error = re.sub(r'(?:[A-Za-z]:\\|/(?:Users|private|home|var|tmp)/)[^\s\"<>]+', '[runner_path]', error)
         print(json.dumps({"bootstrap_failed": True, "exit": result.returncode, "diagnostic_head": error[:2500], "diagnostic_tail": error[-1200:]}, ensure_ascii=True))
         return result.returncode
-    executable = home / "newapi-runtime/codex-0.164.0" / ("codex.exe" if os.name == "nt" else "codex")
+    executable = Path(env['NEWAPI_CODEX_BINARY']) if os.name == 'nt' else home / 'newapi-runtime/codex-0.164.0/codex'
     if not executable.is_file() or (home / "config.toml").exists():
         raise RuntimeError("bootstrap_did_not_prepare_without_config_change")
     version = subprocess.run([str(executable), "--version"], capture_output=True, timeout=20)
     if version.returncode or b"codex-cli 0.164.0" not in version.stdout:
         raise RuntimeError("prepared_cli_not_verified")
     python_install = home / "newapi-runtime/python"
-    if not python_install.is_dir() or not list(python_install.iterdir()):
+    if os.name == 'nt':
+        if (home / 'newapi-runtime').exists() or (home / 'auth.json').exists():
+            raise RuntimeError('native_setup_created_runtime_or_login')
+        if any(path.startswith(('uv/', 'python/', 'codex/')) for path in gateway.downloads):
+            raise RuntimeError('native_setup_downloaded_runtime')
+    elif not python_install.is_dir() or not list(python_install.iterdir()):
         raise RuntimeError("managed_python_not_installed")
     if list((home / "newapi-runtime").glob("prepare.*")):
         raise RuntimeError("temporary_bootstrap_not_cleaned")
     summary = {"platform": sys.platform, "passed": True, "codex_on_path_not_required": True,
-        "system_python_not_used": True, "managed_python_prepared": True, "official_cli_sha_verified": True,
+        "system_python_not_used": True, "managed_python_prepared": os.name != 'nt', "official_cli_sha_verified": True,
+        "uses_installed_codex": os.name == 'nt', "runtime_downloads_required": os.name != 'nt',
         "config_unchanged": True, "temporary_downloads_removed": True,
          "github_access_blocked_for_client": True, "server_only_downloads": True,
          "downloaded_components": gateway.downloads,

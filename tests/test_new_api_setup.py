@@ -50,7 +50,7 @@ class Gateway:
         csr, leaf = root / "server.csr", root / "server-cert.pem"
         leaf_configuration = root / "leaf.conf"
         leaf_configuration.write_text("[ext]\nsubjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
-        for args in [["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", str(key), "-out", str(csr)],
+        for args in [["req", "-new", "-newkey", "rsa:2048", "-nodes", "-config", str(configuration), "-subj", "/CN=localhost", "-keyout", str(key), "-out", str(csr)],
                      ["x509", "-req", "-in", str(csr), "-CA", str(self.cert), "-CAkey", str(ca_key), "-CAcreateserial", "-days", "2", "-sha256", "-extfile", str(leaf_configuration), "-extensions", "ext", "-out", str(leaf)]]:
             process = subprocess.run([executable, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if process.returncode:raise RuntimeError("test_leaf_certificate_failed")

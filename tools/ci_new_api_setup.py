@@ -146,7 +146,9 @@ def restricted_windows_child(bootstrap=False):
     if bootstrap and code.value == 0 and os.environ.get("GITHUB_ENV"):
         # The runner's command file is service-owned, deliberately not writable by
         # our non-admin child. Publish the verified executable from the parent.
-        executable = Path(os.environ["RUNNER_TEMP"]) / "newapi-bootstrap-home/newapi-runtime/codex-0.164.0/codex.exe"
+        result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'newapi-bootstrap-result.json').read_text())
+        if not result.get('uses_installed_codex'):raise RuntimeError('native_codex_reuse_not_verified')
+        executable = Path(os.environ['RUNNER_TEMP']) / 'newapi-fixture-mirror/codex/0.164.0/codex-x86_64-pc-windows-msvc.exe'
         if not executable.is_file():raise RuntimeError("verified_bootstrap_cli_missing")
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
             output.write("NEWAPI_CODEX_BINARY=" + str(executable) + "\n")
@@ -234,7 +236,27 @@ def supplemental(setup):
     return checks
 
 
+def run_windows():
+    """Exercise the native Windows entry, not the superseded Python client."""
+    from tests import test_new_api_windows
+    source = (ROOT / "tools/new_api_bootstrap.ps1").read_text(encoding="utf-8").encode("utf-8")
+    suite = unittest.defaultTestLoader.loadTestsFromModule(test_new_api_windows)
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    report = {"platform": sys.platform, "python": sys.version.split()[0],
+        "source_sha256": hashlib.sha256(source).hexdigest(), "client": "native_powershell",
+        "auth_state_method": "synthetic records, no real user login",
+        "desktop_method": "installed CLI and representative install layouts, not full app UI",
+        "tests_run": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
+        "skipped": len(result.skipped), "passed": result.wasSuccessful()}
+    destination = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "newapi-test-result.json"
+    destination.write_text(json.dumps(report, indent=2))
+    print(json.dumps(report))
+    return 0 if report["passed"] else 1
+
+
 def run():
+    if os.name == "nt":
+        return run_windows()
     from tests.test_new_api_setup import NewApiSetupTests, setup
     source = (ROOT / "tools/new_api_setup.py").read_text(encoding="utf-8").encode("utf-8")
     report = {"platform": sys.platform, "python": sys.version.split()[0], "codex": VERSION,

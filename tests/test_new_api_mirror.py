@@ -48,9 +48,14 @@ class NewApiMirrorTests(unittest.TestCase):
             text = (ROOT / ('tools/new_api_bootstrap.' + suffix)).read_text(encoding='utf-8')
             self.assertNotIn('github.com', text)
             self.assertNotIn('astral.sh', text)
-            self.assertIn('--offline', text)
-            self.assertIn('--mirror', text)
-            self.assertIn('__SETUP_SHA256__', text)
+            if suffix == 'sh':
+                self.assertIn('--offline', text)
+                self.assertIn('--mirror', text)
+                self.assertIn('__SETUP_SHA256__', text)
+            else:
+                self.assertIn('config/batchWrite', text)
+                self.assertNotIn('python install', text)
+                self.assertNotIn('Invoke-WebRequest', text)
 
 
 if __name__ == '__main__':
