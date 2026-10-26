@@ -100,9 +100,13 @@ class Gateway:
                 self.reply({"data": [{"id": item} for item in models]})
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                gateway.requests.append({"path": self.path, "correct_auth": self.headers.get("Authorization") == "Bearer " + KEY})
+                effort = body.get("reasoning", {}).get("effort")
+                gateway.requests.append({"path": self.path, "correct_auth": self.headers.get("Authorization") == "Bearer " + KEY,
+                                         "reasoning_effort": effort})
                 if not self.allowed():
                     return self.reply({"error": {"message": "fixture rejected"}}, 401)
+                if body.get("model") == "gpt-6.1-sol" and effort is not None and effort not in ("low", "medium", "high", "xhigh", "max"):
+                    return self.reply({"error": {"message": "Unsupported reasoning effort", "type": "invalid_request_error"}}, 400)
                 response = {"id": "resp_fixture_" + str(time.time_ns()), "object": "response", "created_at": int(time.time()),
                     "status": "completed", "model": "gpt-6.1-sol", "output": [{"id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "NEWAPI_OK", "annotations": []}]}],
                     "usage": {"input_tokens": 123, "input_tokens_details": {"cached_tokens": 23}, "output_tokens": 3, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 126}}

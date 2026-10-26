@@ -331,6 +331,37 @@ enabled = true
         self.configurator.restore("codex", result["backup_id"])
         self.assertTrue(all(not p.exists() for p in self.configurator.paths("codex")))
 
+    def test_known_gpt_reasoning_is_available_without_cache_and_repairs_old_catalog(self):
+        from linux_manager.client_config import _codex_catalog
+        model = 'gpt-6.1-sol'
+        stale = json.dumps({'models': [{'slug': model, 'context_window': 100000,
+            'default_reasoning_level': None, 'supported_reasoning_levels': []}]})
+        for sources in ([], [stale]):
+            with self.subTest(cached=bool(sources)):
+                row = json.loads(_codex_catalog([model], sources))['models'][0]
+                self.assertEqual(row['default_reasoning_level'], 'medium')
+                self.assertEqual([item['effort'] for item in row['supported_reasoning_levels']],
+                                 ['low', 'medium', 'high', 'xhigh', 'max'])
+                if sources:
+                    self.assertEqual(row['context_window'], 100000)
+
+    def test_known_gpt_repairs_only_incompatible_root_reasoning_and_can_restore(self):
+        config = self.configurator.paths('codex')[0]
+        model = 'gpt-6.1-sol'
+        for effort in (None, 'none', 'minimal', 'low', 'high', 'max'):
+            with self.subTest(effort=effort):
+                original = ('"model_reasoning_effort"="' + effort + '"\n' if effort else '')
+                original += "instructions='''\nmodel_reasoning_effort=\"none\"\n'''\n[profiles.other]\nmodel_reasoning_effort=\"none\"\n"
+                self.write(config, original)
+                result = self.configure('codex', model=model, models=[model])
+                actual = tomllib.loads(config.read_text())
+                expected = 'medium' if effort is None else 'low' if effort in ('none', 'minimal') else effort
+                self.assertEqual(actual['model_reasoning_effort'], expected)
+                self.assertEqual(actual['instructions'], tomllib.loads(original)['instructions'])
+                self.assertEqual(actual['profiles']['other']['model_reasoning_effort'], 'none')
+                self.configurator.restore('codex', result['backup_id'])
+                self.assertEqual(config.read_text(), original)
+
     def test_pi_model_filter_keeps_all_new_models_available(self):
         settings = self.configurator.paths("pi")[1]
         self.write(settings, '{"enabledModels":["original/*"]}')

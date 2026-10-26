@@ -272,6 +272,62 @@ class WindowsConfigurationTests(unittest.TestCase):
         result = self.run_ps(self.configure_code(code))
         self.assertEqual(set(json.loads(result.stdout.decode('utf-8'))), set(MODELS))
 
+    def test_fresh_and_incompatible_reasoning_settings_are_repaired_and_restorable(self):
+        for index, effort in enumerate((None, 'none', 'minimal', 'high', 'max')):
+            with self.subTest(effort=effort):
+                self.home = Path(self.temporary.name) / str(index)
+                self.home.mkdir()
+                original = None if effort is None else ('model_reasoning_effort="' + effort + '"\n').encode()
+                if original is not None:
+                    (self.home / 'config.toml').write_bytes(original)
+                self.run_ps(self.configure_code())
+                expected = 'medium' if effort is None else 'low' if effort in ('none', 'minimal') else effort
+                self.assertEqual(self.config()['model_reasoning_effort'], expected)
+                self.run_ps(f'Restore-NewApiConfiguration {ps_quote(self.home)}')
+                target = self.home / 'config.toml'
+                self.assertEqual(target.read_bytes() if target.exists() else None, original)
+
+    def test_model_menu_exposes_reasoning_levels_without_any_cached_metadata(self):
+        code = f"$rpc=New-NewApiRpc {ps_quote(self.codex)} {ps_quote(self.home)};try{{$list=Invoke-NewApiRpc $rpc 'model/list' @{{includeHidden=$true;limit=100}};[Console]::WriteLine(($list.data|ConvertTo-Json -Depth 20 -Compress))}}finally{{Stop-NewApiRpc $rpc}}"
+        result = self.run_ps(self.configure_code(code))
+        rows = {row['model']: row for row in json.loads(result.stdout.decode('utf-8'))}
+        self.assertEqual(rows[MODEL]['defaultReasoningEffort'], 'medium')
+        self.assertEqual([item['reasoningEffort'] for item in rows[MODEL]['supportedReasoningEfforts']],
+                         ['low', 'medium', 'high', 'xhigh', 'max'])
+        self.assertEqual(rows['gemini-3.8-flash-high']['supportedReasoningEfforts'], [])
+
+    def test_old_empty_catalog_does_not_override_known_gpt_reasoning(self):
+        catalog = self.home / 'old-models.json'
+        result = self.run_ps(f"[Console]::WriteLine(((Get-NewApiCatalog @('{MODEL}') {ps_quote(self.home)} @{{}})|ConvertTo-Json -Depth 20 -Compress))")
+        original = json.loads(result.stdout.decode('utf-8'))
+        original['models'][0].update(context_window=262144, default_reasoning_level=None, supported_reasoning_levels=[])
+        catalog.write_text(json.dumps(original))
+        (self.home / 'config.toml').write_text('model_catalog_json=' + json.dumps(str(catalog)) + '\n')
+        self.run_ps(self.configure_code())
+        row = json.loads(Path(self.config()['model_catalog_json']).read_text())['models'][0]
+        self.assertEqual(row['context_window'], 262144)
+        self.assertEqual(row['default_reasoning_level'], 'medium')
+        self.assertEqual([item['effort'] for item in row['supported_reasoning_levels']],
+                         ['low', 'medium', 'high', 'xhigh', 'max'])
+
+    def test_reasoning_metadata_matches_python_catalog_and_keeps_unknown_aliases(self):
+        from linux_manager.client_config import _codex_catalog
+        models = [MODEL, 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-unknown', MODEL.upper(), 'gemini-3.8-flash-high']
+        args = ','.join(map(ps_quote, models))
+        result = self.run_ps(f"[Console]::WriteLine(((Get-NewApiCatalog @({args}) {ps_quote(self.home)} @{{}})|ConvertTo-Json -Depth 20 -Compress))")
+        actual = json.loads(result.stdout.decode('utf-8'))['models']
+        expected = json.loads(_codex_catalog(models, []))['models']
+        for ps_row, py_row in zip(actual, expected):
+            with self.subTest(model=ps_row['slug']):
+                self.assertEqual(ps_row['supported_reasoning_levels'], py_row['supported_reasoning_levels'])
+                self.assertEqual(ps_row['default_reasoning_level'], py_row['default_reasoning_level'])
+
+    def test_gemini_configuration_keeps_existing_reasoning_setting(self):
+        original = 'model_reasoning_effort="none"\n'
+        (self.home / 'config.toml').write_text(original)
+        self.run_ps(f"$r=Set-NewApiConfiguration {ps_quote(self.home)} {ps_quote(self.codex)} 'https://fixture.invalid/v1' '{KEY}' 'gemini-3.8-flash-high' @('gemini-3.8-flash-high')")
+        self.assertEqual(self.config()['model_reasoning_effort'], 'none')
+
     def test_official_user_installer_layouts_are_discovered_without_path(self):
         for index, layout in enumerate(('OpenAI/Codex/bin/version-fixture/codex.exe', 'Programs/OpenAI/Codex/bin/codex.exe', 'Programs/Codex/resources/codex.exe')):
             with self.subTest(layout=layout):
@@ -309,11 +365,18 @@ class WindowsConfigurationTests(unittest.TestCase):
                     '-c', 'web_search="disabled"', '-c', 'features.plugins=false', '-c', 'analytics.enabled=false',
                     '-c', 'model_providers.newapi_gateway.request_max_retries=0', '-c', 'model_providers.newapi_gateway.stream_max_retries=0',
                     'Reply only NEWAPI_OK. Do not use tools.']
-            result = subprocess.run(args, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
-            self.assertEqual(result.returncode, 0, 'isolated_codex_inference_failed')
-            events = [json.loads(line) for line in result.stdout.decode('utf-8', 'replace').splitlines() if line.startswith('{')]
-            self.assertTrue(any(e.get('item', {}).get('text', '').strip() == 'NEWAPI_OK' for e in events))
+            for effort in (None, 'low', 'high', 'xhigh', 'max'):
+                with self.subTest(effort=effort):
+                    before = len(gateway.requests)
+                    selected_args = args if effort is None else args[:-1] + ['-c', 'model_reasoning_effort="' + effort + '"', args[-1]]
+                    result = subprocess.run(selected_args, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
+                    self.assertEqual(result.returncode, 0, 'isolated_codex_inference_failed')
+                    events = [json.loads(line) for line in result.stdout.decode('utf-8', 'replace').splitlines() if line.startswith('{')]
+                    self.assertTrue(any(e.get('item', {}).get('text', '').strip() == 'NEWAPI_OK' for e in events))
+                    self.assertEqual(len(gateway.requests), before + 1)
+                    self.assertEqual(gateway.requests[-1]['reasoning_effort'], effort or 'medium')
             self.assertTrue(gateway.requests and all(r['correct_auth'] for r in gateway.requests))
+            self.assertTrue(all(r['reasoning_effort'] in ('low', 'medium', 'high', 'xhigh', 'max') for r in gateway.requests))
             self.assertEqual(auth.read_bytes(), original_auth)
         finally:
             gateway.close()
@@ -365,6 +428,7 @@ class WindowsGatewayTests(unittest.TestCase):
         self.assertEqual(self.request['model'],MODEL)
         self.assertFalse(self.request['store'])
         self.assertEqual(self.request['max_output_tokens'],32)
+        self.assertEqual(self.request['reasoning']['effort'], 'low')
 
     def test_invalid_key_stops_without_echoing_key(self):
         type(self).reject=True

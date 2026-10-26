@@ -216,7 +216,7 @@ def build_short(report=None):
 
 支持带可用内置 CLI、配置接口版本至少 0.164.0 的原生 Windows 桌面版。旧版本、无内置 CLI 的非官方封装、损坏的 TOML、旧式 `profile` 配置或企业策略阻止修改时会明确停止，保留原文件；不会为了兼容而覆盖整份配置或自动升级客户端。Windows 7、32 位系统、WSL 和禁止用户运行应用的企业策略不在此方式的支持范围。PowerShell 5.1、ISE 和 Windows Terminal 的 PowerShell 标签页可用，无需管理员窗口或修改执行策略。
 
-模型名称和权限来自每次运行时的 New API，不写死某个后台或某个人的密钥。完整能力只复用本地目录中同名模型的已知元数据；未知别名采用保守设置，不编造上下文长度或思考强度。模型出现在菜单中不等于已验证每个模型的工具调用能力，默认模型之外需按实际使用验证。
+模型名称和权限来自每次运行时的 New API，不写死某个后台或某个人的密钥。能力优先复用本地目录中同名模型的元数据；Windows 对已确认的 GPT-6 模型补齐[官方思考等级](https://developers.openai.com/api/docs/guides/deployment-checklist#set-up-reasoningeffort)，新电脑无需模型缓存。`gpt-6.1-sol` / `gpt-6-astra` 支持 `low/medium/high/xhigh/max`；`gpt-6-sol` / `gpt-6-luna` 另支持 `none`。未知别名采用保守设置，不编造上下文长度或思考强度。模型出现在菜单中不等于已验证每个模型的工具调用能力，默认模型之外需按实际使用验证。
 
 ## 下载与隐私
 
@@ -224,11 +224,13 @@ def build_short(report=None):
 - macOS/Linux 仍使用服务器准备方式：安装入口、配置源码、uv 0.13.5、Python 3.13.17 和必要时的 Codex CLI 0.164.0 全部从输入的 Linux 服务器下载，不访问 GitHub、PyPI 等外部下载站。
 - macOS/Linux 的官方组件保持原始文件和摘要，下载后核验 SHA-256；源码以摘要固定版本，缺失或校验失败即停止，不回退到 GitHub。支持 x86_64 与 ARM64，Linux 同时准备 glibc 与 musl Python。
 - 密钥在本机隐藏输入，经 HTTPS 验证；保存在本机受限配置中，macOS/Linux 权限 600，Windows 为当前用户专用 ACL。不把密钥写入命令参数、不读取钥匙串、不上传本机配置。
-- 保留原登录记录、其他服务商、插件和思考强度。默认模型仍为 `gpt-6.1-sol`；已安装的桌面程序不会被覆盖或重启。
+- 保留原登录记录、其他服务商、插件和有效的思考强度。Windows 选择上述已知 GPT 时，未设置等级默认写入 `medium`；与所选模型不兼容的旧值 `none/minimal` 调整为 `low`，原配置保存在私有备份中。默认模型仍为 `gpt-6.1-sol`；已安装的桌面程序不会被覆盖或重启。
 - macOS/Linux 的组件保存在 `newapi-runtime`；Windows 不创建或依赖该运行环境目录。
 - 新旧配置 × 无登录、ChatGPT 登录、API 登录均使用合成记录测试。写入响应丢失时先停止写入进程，再确认本次内容并撤回；撤回失败保留可恢复备份，其他程序的配置变化不被覆盖。连续备份按创建时间恢复，兼容旧备份。
 
 证书无效、网络不通、密钥无效、模型无权限或目录不可写时会明确失败。只有这台服务器可达仍不等于上游推理永远可用；配置完成后可用一句简单问题，并在 New API 使用日志确认模型、Token 和费用。
+
+Windows 若出现 `Unsupported value: 'none' ... 'gpt-6.1-sol'`，或 GPT 思考等级为空，请重新复制本教程当前的 Windows 命令运行，选择 GPT 默认模型，然后正常退出并重开 Codex、新建会话。新版命令会修正旧的空模型目录和不兼容等级；旧会话可能保留原来的 `none`。只手工将配置顶部的 `model_reasoning_effort` 改为 `low` 可以临时避开该参数错误，但恢复完整思考等级菜单仍需更新模型目录。
 
 请在使用 Codex 的同一台电脑、同一用户下配置。Windows 与 WSL、远程 SSH 与本机桌面相互独立。设置过 `CODEX_HOME` 时，终端和桌面必须使用同一目录。
 

@@ -24,6 +24,16 @@ CLIENTS = {"codex": "GPT / Codex", "claude": "Claude Code", "pi": "Pi", "opencod
 PROVIDER = "linux-manager-cliproxyapi"
 _LOCK = threading.Lock()
 _LIMIT = 4 * 1024 * 1024
+_CODEX_ASSIGNMENT = re.compile(r'''\s*(?P<quote>["']?)(?P<key>model|model_provider|model_catalog_json|model_reasoning_effort)(?P=quote)\s*=''')
+# Exact official IDs; gateway aliases must not inherit another model's capabilities.
+# https://developers.openai.com/api/docs/guides/deployment-checklist#set-up-reasoningeffort
+_CODEX_REASONING_LEVELS = {
+    model: levels
+    for models, levels in (
+        (("gpt-6.1-sol", "gpt-6-astra"), ("low", "medium", "high", "xhigh", "max")),
+        (("gpt-6-sol", "gpt-6-luna"), ("none", "low", "medium", "high", "xhigh", "max")),
+    ) for model in models
+}
 
 
 def chat_models(models):
@@ -54,6 +64,11 @@ def _codex_catalog(models, sources):
             "truncation_policy": {"mode": "tokens", "limit": 10000}, "experimental_supported_tools": [],
             "base_instructions": "You are a coding assistant. Follow the user and repository instructions. Use the available tools when needed. Verify your work and describe the result accurately."}
         row.update(copy.deepcopy(metadata.get(model, {})))
+        levels = _CODEX_REASONING_LEVELS.get(model, ())
+        if levels:
+            row["supported_reasoning_levels"] = [{"effort": effort, "description": effort + " reasoning effort"} for effort in levels]
+            if row["default_reasoning_level"] not in levels:
+                row["default_reasoning_level"] = "medium"
         row.update(slug=model, visibility="list", supported_in_api=True, priority=index, upgrade=None)
         rows.append(row)
     return _json_bytes({"models": rows})
@@ -144,7 +159,7 @@ def _toml_structure(text):
     assignments = []
     quote = None
     for index, line in enumerate(text.splitlines(keepends=True)):
-        if quote is None and re.match(r'\s*(?:model|model_provider|model_catalog_json|"model"|"model_provider"|"model_catalog_json"|\'model\'|\'model_provider\'|\'model_catalog_json\')\s*=', line):
+        if quote is None and _CODEX_ASSIGNMENT.match(line):
             assignments.append(index)
         if quote is None and line.lstrip().startswith("["):
             try:
@@ -184,6 +199,11 @@ def _codex_config(content, base, model, key_path, catalog_path):
         raise ManagerError("Codex 配置不是有效的 TOML；未覆盖原文件。") from None
     if current.get("profile"):
         raise ManagerError("Codex 正在使用独立 profile；请先取消默认 profile，再配置客户端。")
+    levels = _CODEX_REASONING_LEVELS.get(model, ())
+    effort = current.get("model_reasoning_effort")
+    repair_reasoning = bool(levels) and effort not in levels
+    if repair_reasoning:
+        effort = "low" if effort in ("none", "minimal") else "medium"
     lines = text.splitlines(keepends=True)
     headers, assignments = _toml_structure(text)
     root_end = headers[0][0] if headers else len(lines)
@@ -191,8 +211,10 @@ def _codex_config(content, base, model, key_path, catalog_path):
     for index in assignments:
         if index >= root_end:
             continue
-        match = re.match(r'\s*(?:model|model_provider|model_catalog_json|"model"|"model_provider"|"model_catalog_json"|\'model\'|\'model_provider\'|\'model_catalog_json\')\s*=', lines[index])
+        match = _CODEX_ASSIGNMENT.match(lines[index])
         if not match:
+            continue
+        if match["key"] == "model_reasoning_effort" and not repair_reasoning:
             continue
         value = lines[index][match.end():]
         end = index
@@ -212,6 +234,8 @@ def _codex_config(content, base, model, key_path, catalog_path):
             remove.update(range(index, headers[n + 1][0] if n + 1 < len(headers) else len(lines)))
     prefix = "model = " + json.dumps(model, ensure_ascii=False) + "\nmodel_provider = " + json.dumps(PROVIDER) + "\n"
     prefix += "model_catalog_json = " + json.dumps(str(catalog_path), ensure_ascii=False) + "\n"
+    if repair_reasoning:
+        prefix += "model_reasoning_effort = " + json.dumps(effort) + "\n"
     remaining = "".join(line for i, line in enumerate(lines) if i not in remove)
     block = (f'\n[model_providers.{PROVIDER}]\nname = "Linux CLIProxyAPI"\n'
              f'base_url = {json.dumps(base)}\nwire_api = "responses"\n'
@@ -224,6 +248,8 @@ def _codex_config(content, base, model, key_path, catalog_path):
             raise ValueError()
         expected = dict(current)
         expected.update(model=model, model_provider=PROVIDER, model_catalog_json=str(catalog_path))
+        if repair_reasoning:
+            expected["model_reasoning_effort"] = effort
         expected["model_providers"] = dict(current.get("model_providers", {}))
         expected["model_providers"][PROVIDER] = checked["model_providers"][PROVIDER]
         if checked != expected:

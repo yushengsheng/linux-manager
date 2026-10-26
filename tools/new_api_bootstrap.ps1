@@ -244,9 +244,19 @@ function Get-NewApiModels([string]$Base,[string]$Key){
   return ,($models.ToArray())
 }
 
+function Get-NewApiReasoningLevels([string]$Model){
+  # Exact official model IDs only; unknown gateway aliases keep their own metadata.
+  # https://developers.openai.com/api/docs/guides/deployment-checklist#set-up-reasoningeffort
+  if($Model -cin @('gpt-6.1-sol','gpt-6-astra')){return @('low','medium','high','xhigh','max')}
+  if($Model -cin @('gpt-6-sol','gpt-6-luna')){return @('none','low','medium','high','xhigh','max')}
+  return @()
+}
+
 function Test-NewApiResponses([string]$Base,[string]$Key,[string]$Selected){
   Write-Host '正在用一条短请求检查默认模型的 Responses 接口…'
-  $reply=Invoke-NewApiHttp ($Base+'/responses') $Key @{model=$Selected;input='Reply OK.';max_output_tokens=32;store=$false}
+  $body=@{model=$Selected;input='Reply OK.';max_output_tokens=32;store=$false}
+  if(@(Get-NewApiReasoningLevels $Selected).Count){$body.reasoning=@{effort='low'}}
+  $reply=Invoke-NewApiHttp ($Base+'/responses') $Key $body
   if($reply.object -ne 'response' -or $reply.status -notin @('completed','incomplete') -or $reply.output -isnot [Collections.IList]){throw '默认模型未返回有效的 Responses 响应，未修改配置。'}
 }
 
@@ -264,6 +274,12 @@ function Get-NewApiCatalog([string[]]$Models,[string]$Directory,$Existing){
   foreach($name in $Models){
     $row=@{slug=$name;display_name=$name;description='New API gateway model';default_reasoning_level=$null;supported_reasoning_levels=@();shell_type='unified_exec';visibility='list';supported_in_api=$true;priority=$index;upgrade=$null;context_window=32768;input_modalities=@('text');support_verbosity=$false;default_verbosity=$null;apply_patch_tool_type='freeform';truncation_policy=@{mode='tokens';limit=10000};experimental_supported_tools=@();base_instructions='You are a coding assistant. Follow the user and repository instructions. Use the available tools when needed. Verify your work and describe the result accurately.'}
     if($metadata.ContainsKey($name)){foreach($key in $metadata[$name].Keys){$row[$key]=$metadata[$name][$key]}}
+    $levels=@(Get-NewApiReasoningLevels $name)
+    if($levels.Count){
+      # Repair old generated catalogs too: their empty levels must not win over known capabilities.
+      $row.supported_reasoning_levels=@($levels | ForEach-Object {@{effort=$_;description=($_+' reasoning effort')}})
+      if($row.default_reasoning_level -cnotin $levels){$row.default_reasoning_level='medium'}
+    }
     $row.slug=$name;$row.visibility='list';$row.supported_in_api=$true;$row.priority=$index;$row.upgrade=$null
     $rows+=,$row;$index++
   }
@@ -317,11 +333,18 @@ function Set-NewApiConfiguration([string]$Directory,[string]$Codex,[string]$Base
     $provider=@{name='New API';base_url=$Base;wire_api='responses';experimental_bearer_token=$Key;requires_openai_auth=$false;supports_websockets=$false}
     $expected=ConvertTo-NewApiMap $layer.config
     $expected.model=$Selected;$expected.model_provider='newapi_gateway';$expected.model_catalog_json=$catalog
+    $levels=@(Get-NewApiReasoningLevels $Selected)
+    $repairReasoning=$levels.Count -gt 0 -and $layer.config.model_reasoning_effort -cnotin $levels
+    if($repairReasoning){
+      $effort='medium';if($layer.config.model_reasoning_effort -cin @('none','minimal')){$effort='low'}
+      $expected.model_reasoning_effort=$effort
+    }
     if(!$expected.model_providers){$expected.model_providers=@{}}
     $expected.model_providers.newapi_gateway=$provider
     $expectedJson=(ConvertTo-NewApiCanonical $expected) | ConvertTo-Json -Depth 100 -Compress
     $edits=@()
     foreach($entry in @(@('model',$Selected),@('model_provider','newapi_gateway'),@('model_catalog_json',$catalog),@('model_providers.newapi_gateway',$provider))){$edits+=@{keyPath=$entry[0];value=$entry[1];mergeStrategy='replace'}}
+    if($repairReasoning){$edits+=@{keyPath='model_reasoning_effort';value=$effort;mergeStrategy='replace'}}
     $expectedBytes=Get-NewApiExpectedBytes $backup $Codex $original $edits
     $params=@{filePath=$target;reloadUserConfig=$false;edits=$edits}
     if($layer.version){$params.expectedVersion=$layer.version}
